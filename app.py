@@ -221,14 +221,21 @@ Create a clear, comprehensive summary that captures the main points, key informa
 Create a clear, very concise, comprehensive summary that captures the main points and key information."""
 
             with st.spinner("Generating summary with Qwen Coder..."):
-                # Call Qwen Coder CLI with the prompt
-                result = subprocess.run([
-                    r'node',
-                    r'C:\\Users\\tesla\\AppData\\Roaming\\npm\\node_modules\\@qwen-code\\qwen-code\\dist\\index.js',
-                    '--prompt', prompt
-                ], capture_output=True, text=True, encoding='utf-8', timeout=120)
+                # Call Qwen Coder CLI with the prompt. Try 'qwen' first, then fallback to a common
+                # global node_modules path. Streamlit Cloud commonly has 'node' available.
+                result = None
+                try:
+                    result = subprocess.run(['qwen', '--prompt', prompt], capture_output=True, text=True, encoding='utf-8', timeout=120)
+                except FileNotFoundError:
+                    # Fallback to node + global module path. Allow override via QWEN_NODE_PATH env var.
+                    node_module_path = os.environ.get('QWEN_NODE_PATH', '/usr/local/lib/node_modules/@qwen-code/qwen-code/dist/index.js')
+                    try:
+                        result = subprocess.run(['node', node_module_path, '--prompt', prompt], capture_output=True, text=True, encoding='utf-8', timeout=120)
+                    except FileNotFoundError:
+                        st.error("⚠️ Qwen CLI not found. Install the `qwen` CLI or set QWEN_NODE_PATH to the qwen-code JS file.")
+                        return None
 
-                if result.returncode != 0:
+                if result is None or result.returncode != 0:
                     st.error("⚠️ AI processing failed. Please try again.")
                     return None
 
