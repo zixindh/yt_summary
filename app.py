@@ -349,83 +349,117 @@ def main():
     # Initialize the summarizer
     summarizer = YouTubeSummarizer()
 
-    # Input section with form for better UX
-    st.markdown("### Enter YouTube URL")
+    # Input section with two options: URL or upload audio (helps with restricted videos)
+    st.markdown("### Input")
 
-    # Create a form to handle Enter key and button clicks
-    with st.form("url_form"):
-        url = st.text_input(
-            "YouTube URL",
-            placeholder="Paste your YouTube video link here...",
-            label_visibility="hidden"
-        )
+    input_method = st.radio("Choose input method:", ("YouTube URL", "Upload audio file"), index=0, horizontal=True)
 
-        # Submit button - always enabled when form is submitted
-        submitted = st.form_submit_button("Summarize", type="primary")
+    audio_file = None
+    video_title = None
 
-    # Process when form is submitted (either by button click or Enter key)
-    if submitted and url:
-        # Validate URL
-        if "youtube.com" not in url and "youtu.be" not in url:
-            st.error("⚠️ Please enter a valid YouTube URL")
-            return
+    if input_method == "YouTube URL":
+        # Create a form to handle Enter key and button clicks
+        with st.form("url_form"):
+            url = st.text_input(
+                "YouTube URL",
+                placeholder="Paste your YouTube video link here...",
+                label_visibility="hidden"
+            )
 
-        # Progress bar
-        progress_bar = st.progress(0)
-        status_text = st.empty()
+            # Submit button - always enabled when form is submitted
+            submitted = st.form_submit_button("Summarize", type="primary")
 
-        try:
-            # Step 1: Download video
-            status_text.text("Processing video...")
-            progress_bar.progress(10)
-
-            audio_file, video_title = summarizer.download_youtube_video(url)
-            if not audio_file:
+        # Process when form is submitted (either by button click or Enter key)
+        if submitted and url:
+            # Validate URL
+            if "youtube.com" not in url and "youtu.be" not in url:
+                st.error("⚠️ Please enter a valid YouTube URL")
                 return
 
-            progress_bar.progress(30)
+            # Progress bar
+            progress_bar = st.progress(0)
+            status_text = st.empty()
 
-            # Step 2: Transcribe audio
-            status_text.text("Converting to text...")
-            transcript = summarizer.transcribe_audio(audio_file)
-
-            if not transcript:
-                return
-
-            progress_bar.progress(60)
-
-            # Display transcript (secondary)
-            with st.expander("View full transcript"):
-                st.text_area("Full transcript", transcript, height=200, disabled=True, label_visibility="hidden")
-
-            # Step 3: Generate summary
-            status_text.text("Creating summary...")
-            summary = summarizer.summarize_text(transcript, video_title)
-
-            if not summary:
-                return
-
-            progress_bar.progress(100)
-            status_text.text("Complete!")
-
-            # Display results - focus on summary
-            st.markdown("### Summary")
-            st.markdown(f'<div class="success-message">{summary}</div>', unsafe_allow_html=True)
-
-            # Cleanup
             try:
-                os.remove(audio_file)
-            except:
-                pass
+                # Step 1: Download video
+                status_text.text("Processing video...")
+                progress_bar.progress(10)
 
-        except Exception as e:
-            st.markdown(f'<div class="error-message">❌ Error: {str(e)}</div>', unsafe_allow_html=True)
+                audio_file, video_title = summarizer.download_youtube_video(url)
+                if not audio_file:
+                    return
 
-        finally:
-            progress_bar.empty()
-            status_text.empty()
+                progress_bar.progress(30)
+
+                # Step 2: Transcribe audio
+                status_text.text("Converting to text...")
+                transcript = summarizer.transcribe_audio(audio_file)
+
+                if not transcript:
+                    return
+
+                progress_bar.progress(60)
+
+                # Display transcript (secondary)
+                with st.expander("View full transcript"):
+                    st.text_area("Full transcript", transcript, height=200, disabled=True, label_visibility="hidden")
+
+                # Step 3: Generate summary
+                status_text.text("Creating summary...")
+                summary = summarizer.summarize_text(transcript, video_title)
+
+                if not summary:
+                    return
+
+                progress_bar.progress(100)
+                status_text.text("Complete!")
+
+                # Display results - focus on summary
+                st.markdown("### Summary")
+                st.markdown(f'<div class="success-message">{summary}</div>', unsafe_allow_html=True)
+
+                # Cleanup
+                try:
+                    os.remove(audio_file)
+                except:
+                    pass
+
+            except Exception as e:
+                st.markdown(f'<div class="error-message">❌ Error: {str(e)}</div>', unsafe_allow_html=True)
+
+            finally:
+                progress_bar.empty()
+                status_text.empty()
 
     # Minimal footer
+    elif input_method == "Upload audio file":
+        uploaded = st.file_uploader("Upload an audio file (mp3, wav, m4a)", type=["mp3", "wav", "m4a"], accept_multiple_files=False)
+        if uploaded is not None:
+            # Save uploaded file to videos/ and proceed
+            saved_path = summarizer.videos_dir / summarizer.sanitize_filename(uploaded.name)
+            with open(saved_path, "wb") as f:
+                f.write(uploaded.getbuffer())
+
+            st.success(f"Saved uploaded file to {saved_path}")
+
+            # Transcribe
+            with st.spinner("Transcribing uploaded audio..."):
+                transcript = summarizer.transcribe_audio(str(saved_path))
+
+            if not transcript:
+                st.error("⚠️ Transcription failed for uploaded file.")
+            else:
+                with st.expander("View full transcript"):
+                    st.text_area("Full transcript", transcript, height=200, disabled=True, label_visibility="hidden")
+
+                summary = summarizer.summarize_text(transcript, video_title=None)
+                if summary:
+                    st.markdown("### Summary")
+                    st.markdown(f'<div class="success-message">{summary}</div>', unsafe_allow_html=True)
+                try:
+                    os.remove(saved_path)
+                except:
+                    pass
     st.markdown("---")
     st.markdown(
         "<div style='text-align: center; color: #999; font-size: 0.9rem;'>"
