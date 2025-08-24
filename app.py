@@ -1,6 +1,6 @@
 import streamlit as st
 import yt_dlp
-import whisper
+import openai
 import os
 import tempfile
 import subprocess
@@ -86,11 +86,8 @@ class YouTubeSummarizer:
         self._set_ffmpeg_for_whisper()
 
     def load_whisper_model(self):
-        """Load Whisper model for transcription"""
-        if self.whisper_model is None:
-            with st.spinner("Loading Whisper model..."):
-                self.whisper_model = whisper.load_model("base")
-        return self.whisper_model
+        """Placeholder kept for compatibility; we use OpenAI API for transcription in cloud."""
+        return None
 
     def _set_ffmpeg_for_whisper(self):
         """Set FFmpeg path for Whisper to use"""
@@ -186,11 +183,30 @@ class YouTubeSummarizer:
                 st.error("⚠️ Audio processing failed. Please try again.")
                 return None
 
-            model = self.load_whisper_model()
+            with st.spinner("Transcribing audio via OpenAI..."):
+                # Use OpenAI's speech-to-text (Whisper API) — requires OPENAI_API_KEY in env
+                try:
+                    with open(audio_path, "rb") as af:
+                        response = openai.Audio.transcriptions.create(file=af, model="gpt-4o-transcribe")
+                    # The new OpenAI SDK may return text under different keys; try common ones
+                    text = None
+                    if isinstance(response, dict):
+                        text = response.get("text") or response.get("transcript")
+                    else:
+                        # Fallback for older responses
+                        text = getattr(response, 'text', None)
 
-            with st.spinner("Transcribing audio..."):
-                result = model.transcribe(str(audio_path))
-                return result["text"]
+                    if not text:
+                        st.error("⚠️ Transcription failed. No text returned from OpenAI.")
+                        return None
+
+                    return text
+                except openai.error.OpenAIError as oe:
+                    st.error(f"⚠️ OpenAI transcription failed: {str(oe)}")
+                    return None
+                except Exception as e:
+                    st.error("⚠️ Audio transcription failed. Please try again.")
+                    return None
 
         except Exception as e:
             st.error("⚠️ Audio transcription failed. Please try again.")
