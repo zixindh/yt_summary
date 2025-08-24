@@ -98,8 +98,14 @@ class YouTubeSummarizer:
 
         if self.whisper_model is None:
             with st.spinner("Loading local Whisper model..."):
-                # Default to 'base' model; user can change in code if desired
-                self.whisper_model = whisper.load_model("base")
+                # Default to smaller 'tiny' model for Streamlit Cloud to reduce memory
+                # and download size. Change to 'base' or 'small' locally if you have more resources.
+                try:
+                    self.whisper_model = whisper.load_model("tiny")
+                except Exception as e:
+                    # Provide a helpful message in the UI and return None so the app can fall back
+                    st.error(f"⚠️ Failed to load Whisper model: {e}")
+                    return None
         return self.whisper_model
 
     def _set_ffmpeg_for_whisper(self):
