@@ -1,6 +1,12 @@
 import streamlit as st
 import yt_dlp
 import openai
+try:
+    import whisper
+    WHISPER_AVAILABLE = True
+except Exception:
+    whisper = None
+    WHISPER_AVAILABLE = False
 import os
 import tempfile
 import subprocess
@@ -86,8 +92,15 @@ class YouTubeSummarizer:
         self._set_ffmpeg_for_whisper()
 
     def load_whisper_model(self):
-        """Placeholder kept for compatibility; we use OpenAI API for transcription in cloud."""
-        return None
+        """Load local Whisper model if available. Returns model or None."""
+        if not WHISPER_AVAILABLE:
+            return None
+
+        if self.whisper_model is None:
+            with st.spinner("Loading local Whisper model..."):
+                # Default to 'base' model; user can change in code if desired
+                self.whisper_model = whisper.load_model("base")
+        return self.whisper_model
 
     def _set_ffmpeg_for_whisper(self):
         """Set FFmpeg path for Whisper to use"""
@@ -183,30 +196,47 @@ class YouTubeSummarizer:
                 st.error("⚠️ Audio processing failed. Please try again.")
                 return None
 
-            with st.spinner("Transcribing audio via OpenAI..."):
-                # Use OpenAI's speech-to-text (Whisper API) — requires OPENAI_API_KEY in env
-                try:
-                    with open(audio_path, "rb") as af:
-                        response = openai.Audio.transcriptions.create(file=af, model="gpt-4o-transcribe")
-                    # The new OpenAI SDK may return text under different keys; try common ones
-                    text = None
-                    if isinstance(response, dict):
-                        text = response.get("text") or response.get("transcript")
-                    else:
-                        # Fallback for older responses
-                        text = getattr(response, 'text', None)
+            # Prefer local Whisper if available and user is running in a local environment
+            model = self.load_whisper_model()
+            if model is not None:
+                with st.spinner("Transcribing audio with local Whisper model..."):
+                    try:
+                        result = model.transcribe(str(audio_path))
+                        return result.get("text")
+                    except Exception as e:
+                        st.error("⚠️ Local Whisper transcription failed. Falling back to OpenAI if available.")
 
-                    if not text:
-                        st.error("⚠️ Transcription failed. No text returned from OpenAI.")
+            # Fallback: Use OpenAI's speech-to-text if OPENAI_API_KEY is provided
+            openai_key = os.environ.get('OPENAI_API_KEY')
+            if openai_key:
+                openai.api_key = openai_key
+                with st.spinner("Transcribing audio via OpenAI..."):
+                    try:
+                        with open(audio_path, "rb") as af:
+                            # Use the Whisper transcription endpoint (may vary by SDK version)
+                            response = openai.Audio.transcriptions.create(file=af, model="gpt-4o-transcribe")
+
+                        # Extract text from response
+                        text = None
+                        if isinstance(response, dict):
+                            text = response.get("text") or response.get("transcript")
+                        else:
+                            text = getattr(response, 'text', None)
+
+                        if not text:
+                            st.error("⚠️ Transcription failed. No text returned from OpenAI.")
+                            return None
+
+                        return text
+                    except openai.error.OpenAIError as oe:
+                        st.error(f"⚠️ OpenAI transcription failed: {str(oe)}")
+                        return None
+                    except Exception:
+                        st.error("⚠️ Audio transcription failed. Please try again.")
                         return None
 
-                    return text
-                except openai.error.OpenAIError as oe:
-                    st.error(f"⚠️ OpenAI transcription failed: {str(oe)}")
-                    return None
-                except Exception as e:
-                    st.error("⚠️ Audio transcription failed. Please try again.")
-                    return None
+            st.error("⚠️ No transcription backend available. Install 'openai-whisper' locally or set OPENAI_API_KEY for cloud transcription.")
+            return None
 
         except Exception as e:
             st.error("⚠️ Audio transcription failed. Please try again.")
