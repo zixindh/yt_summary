@@ -1,12 +1,6 @@
 import streamlit as st
 import yt_dlp
-import openai
-try:
-    import whisper
-    WHISPER_AVAILABLE = True
-except Exception:
-    whisper = None
-    WHISPER_AVAILABLE = False
+import whisper
 import os
 import tempfile
 import subprocess
@@ -92,20 +86,10 @@ class YouTubeSummarizer:
         self._set_ffmpeg_for_whisper()
 
     def load_whisper_model(self):
-        """Load local Whisper model if available. Returns model or None."""
-        if not WHISPER_AVAILABLE:
-            return None
-
+        """Load Whisper model for transcription"""
         if self.whisper_model is None:
-            with st.spinner("Loading local Whisper model..."):
-                # Default to smaller 'tiny' model for Streamlit Cloud to reduce memory
-                # and download size. Change to 'base' or 'small' locally if you have more resources.
-                try:
-                    self.whisper_model = whisper.load_model("tiny")
-                except Exception as e:
-                    # Provide a helpful message in the UI and return None so the app can fall back
-                    st.error(f"⚠️ Failed to load Whisper model: {e}")
-                    return None
+            with st.spinner("Loading Whisper model..."):
+                self.whisper_model = whisper.load_model("base")
         return self.whisper_model
 
     def _set_ffmpeg_for_whisper(self):
@@ -202,47 +186,11 @@ class YouTubeSummarizer:
                 st.error("⚠️ Audio processing failed. Please try again.")
                 return None
 
-            # Prefer local Whisper if available and user is running in a local environment
             model = self.load_whisper_model()
-            if model is not None:
-                with st.spinner("Transcribing audio with local Whisper model..."):
-                    try:
-                        result = model.transcribe(str(audio_path))
-                        return result.get("text")
-                    except Exception as e:
-                        st.error("⚠️ Local Whisper transcription failed. Falling back to OpenAI if available.")
 
-            # Fallback: Use OpenAI's speech-to-text if OPENAI_API_KEY is provided
-            openai_key = os.environ.get('OPENAI_API_KEY')
-            if openai_key:
-                openai.api_key = openai_key
-                with st.spinner("Transcribing audio via OpenAI..."):
-                    try:
-                        with open(audio_path, "rb") as af:
-                            # Use the Whisper transcription endpoint (may vary by SDK version)
-                            response = openai.Audio.transcriptions.create(file=af, model="gpt-4o-transcribe")
-
-                        # Extract text from response
-                        text = None
-                        if isinstance(response, dict):
-                            text = response.get("text") or response.get("transcript")
-                        else:
-                            text = getattr(response, 'text', None)
-
-                        if not text:
-                            st.error("⚠️ Transcription failed. No text returned from OpenAI.")
-                            return None
-
-                        return text
-                    except openai.error.OpenAIError as oe:
-                        st.error(f"⚠️ OpenAI transcription failed: {str(oe)}")
-                        return None
-                    except Exception:
-                        st.error("⚠️ Audio transcription failed. Please try again.")
-                        return None
-
-            st.error("⚠️ No transcription backend available. Install 'openai-whisper' locally or set OPENAI_API_KEY for cloud transcription.")
-            return None
+            with st.spinner("Transcribing audio..."):
+                result = model.transcribe(str(audio_path))
+                return result["text"]
 
         except Exception as e:
             st.error("⚠️ Audio transcription failed. Please try again.")
@@ -273,21 +221,14 @@ Create a clear, comprehensive summary that captures the main points, key informa
 Create a clear, very concise, comprehensive summary that captures the main points and key information."""
 
             with st.spinner("Generating summary with Qwen Coder..."):
-                # Call Qwen Coder CLI with the prompt. Try 'qwen' first, then fallback to a common
-                # global node_modules path. Streamlit Cloud commonly has 'node' available.
-                result = None
-                try:
-                    result = subprocess.run(['qwen', '--prompt', prompt], capture_output=True, text=True, encoding='utf-8', timeout=120)
-                except FileNotFoundError:
-                    # Fallback to node + global module path. Allow override via QWEN_NODE_PATH env var.
-                    node_module_path = os.environ.get('QWEN_NODE_PATH', '/usr/local/lib/node_modules/@qwen-code/qwen-code/dist/index.js')
-                    try:
-                        result = subprocess.run(['node', node_module_path, '--prompt', prompt], capture_output=True, text=True, encoding='utf-8', timeout=120)
-                    except FileNotFoundError:
-                        st.error("⚠️ Qwen CLI not found. Install the `qwen` CLI or set QWEN_NODE_PATH to the qwen-code JS file.")
-                        return None
+                # Call Qwen Coder CLI with the prompt
+                result = subprocess.run([
+                    r'node',
+                    r'C:\\Users\\tesla\\AppData\\Roaming\\npm\\node_modules\\@qwen-code\\qwen-code\\dist\\index.js',
+                    '--prompt', prompt
+                ], capture_output=True, text=True, encoding='utf-8', timeout=120)
 
-                if result is None or result.returncode != 0:
+                if result.returncode != 0:
                     st.error("⚠️ AI processing failed. Please try again.")
                     return None
 
@@ -349,117 +290,83 @@ def main():
     # Initialize the summarizer
     summarizer = YouTubeSummarizer()
 
-    # Input section with two options: URL or upload audio (helps with restricted videos)
-    st.markdown("### Input")
+    # Input section with form for better UX
+    st.markdown("### Enter YouTube URL")
 
-    input_method = st.radio("Choose input method:", ("YouTube URL", "Upload audio file"), index=0, horizontal=True)
+    # Create a form to handle Enter key and button clicks
+    with st.form("url_form"):
+        url = st.text_input(
+            "YouTube URL",
+            placeholder="Paste your YouTube video link here...",
+            label_visibility="hidden"
+        )
 
-    audio_file = None
-    video_title = None
+        # Submit button - always enabled when form is submitted
+        submitted = st.form_submit_button("Summarize", type="primary")
 
-    if input_method == "YouTube URL":
-        # Create a form to handle Enter key and button clicks
-        with st.form("url_form"):
-            url = st.text_input(
-                "YouTube URL",
-                placeholder="Paste your YouTube video link here...",
-                label_visibility="hidden"
-            )
+    # Process when form is submitted (either by button click or Enter key)
+    if submitted and url:
+        # Validate URL
+        if "youtube.com" not in url and "youtu.be" not in url:
+            st.error("⚠️ Please enter a valid YouTube URL")
+            return
 
-            # Submit button - always enabled when form is submitted
-            submitted = st.form_submit_button("Summarize", type="primary")
+        # Progress bar
+        progress_bar = st.progress(0)
+        status_text = st.empty()
 
-        # Process when form is submitted (either by button click or Enter key)
-        if submitted and url:
-            # Validate URL
-            if "youtube.com" not in url and "youtu.be" not in url:
-                st.error("⚠️ Please enter a valid YouTube URL")
+        try:
+            # Step 1: Download video
+            status_text.text("Processing video...")
+            progress_bar.progress(10)
+
+            audio_file, video_title = summarizer.download_youtube_video(url)
+            if not audio_file:
                 return
 
-            # Progress bar
-            progress_bar = st.progress(0)
-            status_text = st.empty()
+            progress_bar.progress(30)
 
-            try:
-                # Step 1: Download video
-                status_text.text("Processing video...")
-                progress_bar.progress(10)
-
-                audio_file, video_title = summarizer.download_youtube_video(url)
-                if not audio_file:
-                    return
-
-                progress_bar.progress(30)
-
-                # Step 2: Transcribe audio
-                status_text.text("Converting to text...")
-                transcript = summarizer.transcribe_audio(audio_file)
-
-                if not transcript:
-                    return
-
-                progress_bar.progress(60)
-
-                # Display transcript (secondary)
-                with st.expander("View full transcript"):
-                    st.text_area("Full transcript", transcript, height=200, disabled=True, label_visibility="hidden")
-
-                # Step 3: Generate summary
-                status_text.text("Creating summary...")
-                summary = summarizer.summarize_text(transcript, video_title)
-
-                if not summary:
-                    return
-
-                progress_bar.progress(100)
-                status_text.text("Complete!")
-
-                # Display results - focus on summary
-                st.markdown("### Summary")
-                st.markdown(f'<div class="success-message">{summary}</div>', unsafe_allow_html=True)
-
-                # Cleanup
-                try:
-                    os.remove(audio_file)
-                except:
-                    pass
-
-            except Exception as e:
-                st.markdown(f'<div class="error-message">❌ Error: {str(e)}</div>', unsafe_allow_html=True)
-
-            finally:
-                progress_bar.empty()
-                status_text.empty()
-
-    # Minimal footer
-    elif input_method == "Upload audio file":
-        uploaded = st.file_uploader("Upload an audio file (mp3, wav, m4a)", type=["mp3", "wav", "m4a"], accept_multiple_files=False)
-        if uploaded is not None:
-            # Save uploaded file to videos/ and proceed
-            saved_path = summarizer.videos_dir / summarizer.sanitize_filename(uploaded.name)
-            with open(saved_path, "wb") as f:
-                f.write(uploaded.getbuffer())
-
-            st.success(f"Saved uploaded file to {saved_path}")
-
-            # Transcribe
-            with st.spinner("Transcribing uploaded audio..."):
-                transcript = summarizer.transcribe_audio(str(saved_path))
+            # Step 2: Transcribe audio
+            status_text.text("Converting to text...")
+            transcript = summarizer.transcribe_audio(audio_file)
 
             if not transcript:
-                st.error("⚠️ Transcription failed for uploaded file.")
-            else:
-                with st.expander("View full transcript"):
-                    st.text_area("Full transcript", transcript, height=200, disabled=True, label_visibility="hidden")
+                return
 
-                summary = summarizer.summarize_text(transcript, video_title=None)
-                if summary:
-                    st.markdown("### Summary")
-                    st.markdown(f'<div class="success-message">{summary}</div>', unsafe_allow_html=True)
-                try:
-                    os.remove(saved_path)
-                except:
-                    pass
+            progress_bar.progress(60)
+
+            # Display transcript (secondary)
+            with st.expander("View full transcript"):
+                st.text_area("Full transcript", transcript, height=200, disabled=True, label_visibility="hidden")
+
+            # Step 3: Generate summary
+            status_text.text("Creating summary...")
+            summary = summarizer.summarize_text(transcript, video_title)
+
+            if not summary:
+                return
+
+            progress_bar.progress(100)
+            status_text.text("Complete!")
+
+            # Display results - focus on summary
+            st.markdown("### Summary")
+            st.markdown(f'<div class="success-message">{summary}</div>', unsafe_allow_html=True)
+
+            # Cleanup
+            try:
+                os.remove(audio_file)
+            except:
+                pass
+
+        except Exception as e:
+            st.markdown(f'<div class="error-message">❌ Error: {str(e)}</div>', unsafe_allow_html=True)
+
+        finally:
+            progress_bar.empty()
+            status_text.empty()
+
+    # Minimal footer
     st.markdown("---")
     st.markdown(
         "<div style='text-align: center; color: #999; font-size: 0.9rem;'>"
