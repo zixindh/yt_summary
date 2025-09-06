@@ -230,8 +230,6 @@ class YouTubeSummarizer:
 
 
     
-    
-    
     def download_with_online_api(self, url):
         """Fallback using RapidAPI YouTube downloader"""
         if not self.rapidapi_key or self.rapidapi_key == 'your_rapidapi_key_here':
@@ -267,19 +265,39 @@ class YouTubeSummarizer:
                     title = data.get('title', 'Unknown')
                     
                     # Download MP3
+                    logging.info(f"Downloading MP3 from: {mp3_url}")
                     mp3_response = requests.get(mp3_url, timeout=60, stream=True)
+                    logging.info(f"MP3 download response status: {mp3_response.status_code}")
+
                     if mp3_response.status_code == 200:
                         # Save to file
                         mp3_path = self.videos_dir / f"rapidapi_{video_id}.mp3"
-                        with open(mp3_path, 'wb') as f:
-                            for chunk in mp3_response.iter_content(chunk_size=8192):
-                                f.write(chunk)
-                                
-                        return str(mp3_path), title
+                        logging.info(f"Saving to: {mp3_path}")
+
+                        try:
+                            with open(mp3_path, 'wb') as f:
+                                for chunk in mp3_response.iter_content(chunk_size=8192):
+                                    f.write(chunk)
+
+                            logging.info(f"Successfully saved MP3 file: {mp3_path}")
+                            return str(mp3_path), title
+                        except Exception as save_error:
+                            logging.error(f"Failed to save MP3 file: {str(save_error)}")
+                            raise Exception(f"File save failed: {str(save_error)}")
+                    else:
+                        logging.error(f"MP3 download failed with status: {mp3_response.status_code}")
+                        raise Exception(f"MP3 download failed: HTTP {mp3_response.status_code}")
                         
         except Exception as e:
             logging.warning(f"RapidAPI download failed: {str(e)}")
-            
+
+            # Provide specific error message for Streamlit Community Cloud
+            error_msg = str(e).lower()
+            if 'connection' in error_msg or 'network' in error_msg:
+                logging.error("Network connectivity issue - this may be due to Streamlit Community Cloud restrictions")
+            elif 'permission' in error_msg or 'access' in error_msg:
+                logging.error("File system permission issue - common on Streamlit Community Cloud")
+
         return None, None
     
     def download_youtube_video(self, url):
@@ -321,8 +339,18 @@ class YouTubeSummarizer:
             elif 'unavailable' in error_msg:
                 st.error("❌ **Video Unavailable**: This video may be deleted, restricted, or region-locked.")
             else:
-                st.error(f"⚠️ **Download Error**: {str(e)[:200]}...")
-                
+                # Provide specific guidance for Streamlit Community Cloud
+                if "streamlit" in str(e).lower() or "cloud" in str(e).lower():
+                    st.error("⚠️ **Streamlit Community Cloud Issue**: File downloads may be restricted.")
+                    st.info("""
+                    **For Streamlit Community Cloud:**
+                    1. Check that your RapidAPI key is configured in Streamlit secrets
+                    2. Some download URLs may be blocked by Streamlit's network restrictions
+                    3. Try using a different YouTube video
+                    """)
+                else:
+                    st.error(f"⚠️ **Download Error**: {str(e)[:200]}...")
+
             # Log full error for debugging
             logging.error(f"Full error: {str(e)}")
             
