@@ -12,8 +12,18 @@ import random
 import json
 import logging
 import re
+import base64
 # Configure logging for debugging
 logging.basicConfig(level=logging.INFO)
+
+# Try to import pytubefix
+try:
+    from pytubefix import YouTube
+    from pytubefix.cli import on_progress
+    PYTUBEFIX_AVAILABLE = True
+except ImportError:
+    PYTUBEFIX_AVAILABLE = False
+    logging.warning("pytubefix not available, skipping this fallback option")
 
 # Page configuration
 st.set_page_config(
@@ -105,6 +115,14 @@ class YouTubeSummarizer:
 
         # Cookie and proxy support via Streamlit Secrets
         self.setup_cookies_and_proxy()
+        
+        # RapidAPI key for online fallback
+        self.rapidapi_key = None
+        try:
+            if hasattr(st, 'secrets'):
+                self.rapidapi_key = st.secrets.get('RAPIDAPI_KEY', '')
+        except:
+            pass
 
         # Set FFmpeg path for Whisper
         self._set_ffmpeg_for_whisper()
@@ -305,6 +323,111 @@ class YouTubeSummarizer:
             logging.warning(f"Subtitle parsing failed: {e}")
             return None
     
+    def download_with_pytubefix(self, url):
+        """Fallback download using pytubefix"""
+        if not PYTUBEFIX_AVAILABLE:
+            return None, None
+            
+        try:
+            # Add delay to avoid bot detection
+            time.sleep(random.uniform(2, 4))
+            
+            # Create YouTube object with proxy if available
+            yt_kwargs = {
+                'url': url,
+                'on_progress_callback': on_progress,
+                'use_oauth': False,
+                'allow_oauth_cache': False
+            }
+            
+            if self.proxy_url:
+                yt_kwargs['proxies'] = {
+                    'http': self.proxy_url,
+                    'https': self.proxy_url
+                }
+                
+            yt = YouTube(**yt_kwargs)
+            
+            # Try to get audio stream
+            audio_stream = yt.streams.get_audio_only()
+            if not audio_stream:
+                # Fallback to lowest quality if audio-only not available
+                audio_stream = yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').asc().first()
+                
+            if audio_stream:
+                # Download the stream
+                output_path = audio_stream.download(
+                    output_path=str(self.videos_dir),
+                    filename_prefix="pytubefix_"
+                )
+                
+                # Convert to mp3
+                mp3_path = Path(output_path).with_suffix('.mp3')
+                try:
+                    subprocess.run([
+                        'ffmpeg', '-i', output_path, '-acodec', 'mp3',
+                        '-ab', '192k', str(mp3_path), '-y'
+                    ], capture_output=True, check=True)
+                    os.remove(output_path)
+                    output_path = str(mp3_path)
+                except:
+                    # If ffmpeg fails, rename to mp3 anyway
+                    os.rename(output_path, str(mp3_path))
+                    output_path = str(mp3_path)
+                    
+                return output_path, yt.title
+                
+        except Exception as e:
+            logging.warning(f"pytubefix failed: {str(e)}")
+            return None, None
+    
+    def download_with_online_api(self, url):
+        """Fallback using RapidAPI YouTube downloader"""
+        if not self.rapidapi_key:
+            return None, None
+            
+        try:
+            # Extract video ID
+            video_id = self.extract_video_id(url)
+            if not video_id:
+                return None, None
+                
+            # RapidAPI endpoint for YouTube MP3 download
+            rapidapi_url = "https://youtube-mp36.p.rapidapi.com/dl"
+            headers = {
+                "X-RapidAPI-Key": self.rapidapi_key,
+                "X-RapidAPI-Host": "youtube-mp36.p.rapidapi.com"
+            }
+            
+            params = {"id": video_id}
+            
+            # Make API request
+            response = requests.get(rapidapi_url, headers=headers, params=params, timeout=30)
+            
+            if response.status_code == 200:
+                data = response.json()
+                
+                if data.get('status') == 'ok' and data.get('link'):
+                    # Download the MP3 file
+                    mp3_url = data['link']
+                    title = data.get('title', 'Unknown')
+                    
+                    # Download MP3
+                    mp3_response = requests.get(mp3_url, timeout=60, stream=True)
+                    if mp3_response.status_code == 200:
+                        # Save to file
+                        mp3_path = self.videos_dir / f"rapidapi_{video_id}.mp3"
+                        with open(mp3_path, 'wb') as f:
+                            for chunk in mp3_response.iter_content(chunk_size=8192):
+                                f.write(chunk)
+                                
+                        return str(mp3_path), title
+                        
+        except Exception as e:
+            logging.warning(f"RapidAPI download failed: {str(e)}")
+            
+        return None, None
+    
     def download_youtube_video(self, url):
         """Download YouTube video with enhanced anti-403 strategies"""
         try:
@@ -337,9 +460,10 @@ class YouTubeSummarizer:
                 'geo_bypass': True,
                 'geo_bypass_country': 'US',
                 'age_limit': None,
-                # Network options
+                # Network options - Force IPv4 to avoid IPv6 issues
                 'force_ipv4': True,
                 'source_address': '0.0.0.0',
+                'prefer_ipv4': True,  # Additional IPv4 preference
                 'concurrent_fragment_downloads': 1,
                 'retries': 10,
                 'fragment_retries': 10,
@@ -429,8 +553,25 @@ class YouTubeSummarizer:
                         time.sleep(random.uniform(1, 3))  # Wait before retry
                         continue
             
-            # If all attempts failed, raise the last error
+            # If all yt-dlp attempts failed, try fallback methods
             if last_error:
+                # Try pytubefix fallback
+                if PYTUBEFIX_AVAILABLE:
+                    st.info("Trying pytubefix fallback...")
+                    audio_file, title = self.download_with_pytubefix(url)
+                    if audio_file and title:
+                        logging.info("Successfully downloaded using pytubefix")
+                        return audio_file, title
+                
+                # Try RapidAPI fallback if available
+                if self.rapidapi_key:
+                    st.info("Trying online API fallback...")
+                    audio_file, title = self.download_with_online_api(url)
+                    if audio_file and title:
+                        logging.info("Successfully downloaded using RapidAPI")
+                        return audio_file, title
+                
+                # If all fallbacks failed, raise the error
                 raise last_error
                 
         except Exception as e:
