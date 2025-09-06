@@ -7,23 +7,23 @@ import subprocess
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 import requests
-from youtube_transcript_api import (
-    YouTubeTranscriptApi,
-    TranscriptsDisabled,
-    NoTranscriptFound,
-    TooManyRequests,
-    VideoUnavailable,
-)
 import time
 import random
 import json
+import logging
+import re
+import base64
+# Configure logging for debugging
+logging.basicConfig(level=logging.INFO)
+
+# Try to import pytubefix
 try:
-    from pytube import YouTube
-    from pytube.exceptions import PytubeError
-    PYTUBE_AVAILABLE = True
+    from pytubefix import YouTube
+    from pytubefix.cli import on_progress
+    PYTUBEFIX_AVAILABLE = True
 except ImportError:
-    PYTUBE_AVAILABLE = False
-    PytubeError = Exception
+    PYTUBEFIX_AVAILABLE = False
+    logging.warning("pytubefix not available, skipping this fallback option")
 
 # Page configuration
 st.set_page_config(
@@ -113,29 +113,49 @@ class YouTubeSummarizer:
             "https://invidious.privacyredirect.com"
         ]
 
-        # Optional: cookie/proxy support via Streamlit Secrets
-        self.cookies_file_path = None
+        # Cookie and proxy support via Streamlit Secrets
+        self.setup_cookies_and_proxy()
+        
+        # RapidAPI key for online fallback
+        self.rapidapi_key = None
         try:
-            cookies_content = st.secrets.get('YTDLP_COOKIES')
-            if cookies_content:
-                temp_cookie_path = Path(tempfile.gettempdir()) / 'yt_cookies.txt'
-                with open(temp_cookie_path, 'w', encoding='utf-8') as f:
-                    f.write(cookies_content)
-                self.cookies_file_path = str(temp_cookie_path)
-        except Exception:
-            self.cookies_file_path = None
-
-        self.proxy_url = None
-        try:
-            proxy_val = st.secrets.get('YTDLP_PROXY')
-            if proxy_val:
-                self.proxy_url = proxy_val
-        except Exception:
-            self.proxy_url = None
+            if hasattr(st, 'secrets'):
+                self.rapidapi_key = st.secrets.get('RAPIDAPI_KEY', '')
+        except:
+            pass
 
         # Set FFmpeg path for Whisper
         self._set_ffmpeg_for_whisper()
 
+    def setup_cookies_and_proxy(self):
+        """Setup cookies and proxy from Streamlit secrets or environment"""
+        self.cookies_file_path = None
+        self.proxy_url = None
+        
+        # Try to get cookies
+        try:
+            # First try Streamlit secrets
+            if hasattr(st, 'secrets'):
+                cookies_content = st.secrets.get('YTDLP_COOKIES', '')
+                if cookies_content:
+                    temp_cookie_path = Path(tempfile.gettempdir()) / 'yt_cookies.txt'
+                    with open(temp_cookie_path, 'w', encoding='utf-8') as f:
+                        f.write(cookies_content)
+                    self.cookies_file_path = str(temp_cookie_path)
+                    logging.info("Loaded cookies from Streamlit secrets")
+        except Exception as e:
+            logging.warning(f"Could not load cookies: {e}")
+            
+        # Try to get proxy
+        try:
+            if hasattr(st, 'secrets'):
+                proxy_val = st.secrets.get('YTDLP_PROXY', '')
+                if proxy_val:
+                    self.proxy_url = proxy_val
+                    logging.info(f"Using proxy from secrets: {proxy_val}")
+        except Exception as e:
+            logging.warning(f"Could not load proxy: {e}")
+    
     def load_whisper_model(self):
         """Load Whisper model for transcription"""
         if self.whisper_model is None:
@@ -205,48 +225,6 @@ class YouTubeSummarizer:
             pass
         return None
 
-    def get_transcript_text(self, url: str):
-        """Attempt to retrieve transcript without downloading media.
-
-        Returns (transcript_text, video_title) or (None, video_title_if_available).
-        """
-        video_id = self.extract_video_id(url)
-        title = self.fetch_title_via_oembed(url)
-        if not video_id:
-            return None, title
-
-        try:
-            # Prefer manually created English subtitles, then auto-generated, then any available language
-            transcripts = YouTubeTranscriptApi.list_transcripts(video_id)
-
-            selected = None
-            try:
-                selected = transcripts.find_manually_created_transcript(["en", "en-US", "en-GB"])  # type: ignore[attr-defined]
-            except Exception:
-                selected = None
-            if selected is None:
-                try:
-                    selected = transcripts.find_generated_transcript(["en", "en-US", "en-GB"])  # type: ignore[attr-defined]
-                except Exception:
-                    selected = None
-            if selected is None:
-                # Fallback to first available transcript of any language
-                try:
-                    selected = next(iter(transcripts))
-                except StopIteration:
-                    selected = None
-
-            if selected is None:
-                return None, title
-
-            # Fetch and join lines
-            chunks = selected.fetch()
-            text = " ".join(chunk.get("text", "").replace("\n", " ") for chunk in chunks).strip()
-            return (text if text else None), title
-        except (TranscriptsDisabled, NoTranscriptFound, VideoUnavailable, TooManyRequests):
-            return None, title
-        except Exception:
-            return None, title
 
     def get_video_info_via_api(self, video_id):
         """Get video info using YouTube's public API endpoints"""
@@ -265,203 +243,366 @@ class YouTubeSummarizer:
             pass
         return None
 
-    def download_with_pytube(self, url):
-        """Fallback download method using pytube"""
-        if not PYTUBE_AVAILABLE:
+
+    def get_subtitles_fallback(self, url):
+        """Try to get subtitles without downloading the video"""
+        try:
+            opts = {
+                'skip_download': True,
+                'writesubtitles': True,
+                'writeautomaticsub': True,
+                'subtitleslangs': ['en', 'en-US', 'en-GB'],
+                'quiet': True,
+                'no_warnings': True,
+                'extract_flat': False,
+            }
+            
+            with yt_dlp.YoutubeDL(opts) as ydl:
+                info = ydl.extract_info(url, download=False)
+                
+                # Check for subtitles
+                if 'subtitles' in info:
+                    for lang in ['en', 'en-US', 'en-GB']:
+                        if lang in info['subtitles']:
+                            subs = info['subtitles'][lang]
+                            if subs and isinstance(subs, list):
+                                # Download subtitle content
+                                for sub in subs:
+                                    if 'url' in sub:
+                                        resp = requests.get(sub['url'], timeout=10)
+                                        if resp.status_code == 200:
+                                            # Parse subtitle text
+                                            text = self._parse_subtitle_content(resp.text, sub.get('ext', 'vtt'))
+                                            if text:
+                                                return text, info.get('title')
+                
+                # Try automatic captions
+                if 'automatic_captions' in info:
+                    for lang in ['en', 'en-US', 'en-GB']:
+                        if lang in info['automatic_captions']:
+                            subs = info['automatic_captions'][lang]
+                            if subs and isinstance(subs, list):
+                                for sub in subs:
+                                    if 'url' in sub:
+                                        resp = requests.get(sub['url'], timeout=10)
+                                        if resp.status_code == 200:
+                                            text = self._parse_subtitle_content(resp.text, sub.get('ext', 'vtt'))
+                                            if text:
+                                                return text, info.get('title')
+                                                
+        except Exception as e:
+            logging.warning(f"Subtitle extraction failed: {e}")
+            
+        return None, None
+    
+    def _parse_subtitle_content(self, content, format='vtt'):
+        """Parse subtitle content to plain text"""
+        try:
+            lines = content.strip().split('\n')
+            text_lines = []
+            
+            if format == 'vtt':
+                # Skip VTT header
+                i = 0
+                while i < len(lines) and not lines[i].strip().startswith('00:'):
+                    i += 1
+                    
+                # Parse VTT content
+                while i < len(lines):
+                    line = lines[i].strip()
+                    # Skip timestamp lines and empty lines
+                    if '-->' not in line and line and not line.isdigit():
+                        # Remove VTT tags
+                        line = re.sub(r'<[^>]+>', '', line)
+                        text_lines.append(line)
+                    i += 1
+                    
+            return ' '.join(text_lines)
+            
+        except Exception as e:
+            logging.warning(f"Subtitle parsing failed: {e}")
+            return None
+    
+    def download_with_pytubefix(self, url):
+        """Fallback download using pytubefix"""
+        if not PYTUBEFIX_AVAILABLE:
             return None, None
             
         try:
-            # Add delay and headers to avoid detection
-            time.sleep(random.uniform(2, 5))
+            # Add delay to avoid bot detection
+            time.sleep(random.uniform(2, 4))
             
-            # Try with custom client
-            yt = YouTube(
-                url,
-                use_oauth=False,
-                allow_oauth_cache=False
-            )
+            # Create YouTube object with proxy if available
+            yt_kwargs = {
+                'url': url,
+                'on_progress_callback': on_progress,
+                'use_oauth': False,
+                'allow_oauth_cache': False
+            }
+            
+            if self.proxy_url:
+                yt_kwargs['proxies'] = {
+                    'http': self.proxy_url,
+                    'https': self.proxy_url
+                }
+                
+            yt = YouTube(**yt_kwargs)
             
             # Try to get audio stream
-            audio_stream = yt.streams.filter(only_audio=True).first()
+            audio_stream = yt.streams.get_audio_only()
             if not audio_stream:
-                audio_stream = yt.streams.filter(progressive=True).order_by('abr').desc().first()
+                # Fallback to lowest quality if audio-only not available
+                audio_stream = yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').asc().first()
                 
             if audio_stream:
                 # Download the stream
                 output_path = audio_stream.download(
                     output_path=str(self.videos_dir),
-                    filename_prefix="audio_"
+                    filename_prefix="pytubefix_"
                 )
                 
-                # Convert to mp3 if needed
-                if not output_path.endswith('.mp3'):
-                    mp3_path = Path(output_path).with_suffix('.mp3')
-                    try:
-                        subprocess.run([
-                            'ffmpeg', '-i', output_path, '-acodec', 'mp3',
-                            '-ab', '192k', str(mp3_path), '-y'
-                        ], capture_output=True, check=True)
-                        os.remove(output_path)
-                        output_path = str(mp3_path)
-                    except:
-                        # If ffmpeg fails, just use the original file
-                        pass
-                        
+                # Convert to mp3
+                mp3_path = Path(output_path).with_suffix('.mp3')
+                try:
+                    subprocess.run([
+                        'ffmpeg', '-i', output_path, '-acodec', 'mp3',
+                        '-ab', '192k', str(mp3_path), '-y'
+                    ], capture_output=True, check=True)
+                    os.remove(output_path)
+                    output_path = str(mp3_path)
+                except:
+                    # If ffmpeg fails, rename to mp3 anyway
+                    os.rename(output_path, str(mp3_path))
+                    output_path = str(mp3_path)
+                    
                 return output_path, yt.title
+                
         except Exception as e:
+            logging.warning(f"pytubefix failed: {str(e)}")
             return None, None
-
-    def download_youtube_video(self, url):
-        
-        try:
-            # Add random delay to avoid bot detection
-            time.sleep(random.uniform(1, 3))
+    
+    def download_with_online_api(self, url):
+        """Fallback using RapidAPI YouTube downloader"""
+        if not self.rapidapi_key:
+            return None, None
             
-            # Clean, robust base options; we will try a couple of player clients
-            common_opts = {
+        try:
+            # Extract video ID
+            video_id = self.extract_video_id(url)
+            if not video_id:
+                return None, None
+                
+            # RapidAPI endpoint for YouTube MP3 download
+            rapidapi_url = "https://youtube-mp36.p.rapidapi.com/dl"
+            headers = {
+                "X-RapidAPI-Key": self.rapidapi_key,
+                "X-RapidAPI-Host": "youtube-mp36.p.rapidapi.com"
+            }
+            
+            params = {"id": video_id}
+            
+            # Make API request
+            response = requests.get(rapidapi_url, headers=headers, params=params, timeout=30)
+            
+            if response.status_code == 200:
+                data = response.json()
+                
+                if data.get('status') == 'ok' and data.get('link'):
+                    # Download the MP3 file
+                    mp3_url = data['link']
+                    title = data.get('title', 'Unknown')
+                    
+                    # Download MP3
+                    mp3_response = requests.get(mp3_url, timeout=60, stream=True)
+                    if mp3_response.status_code == 200:
+                        # Save to file
+                        mp3_path = self.videos_dir / f"rapidapi_{video_id}.mp3"
+                        with open(mp3_path, 'wb') as f:
+                            for chunk in mp3_response.iter_content(chunk_size=8192):
+                                f.write(chunk)
+                                
+                        return str(mp3_path), title
+                        
+        except Exception as e:
+            logging.warning(f"RapidAPI download failed: {str(e)}")
+            
+        return None, None
+    
+    def download_youtube_video(self, url):
+        """Download YouTube video with enhanced anti-403 strategies"""
+        try:
+            # Clear cache before attempting download
+            try:
+                subprocess.run(['yt-dlp', '--rm-cache-dir'], capture_output=True, timeout=5)
+            except:
+                pass
+            
+            # Add random delay to avoid bot detection
+            time.sleep(random.uniform(2, 5))
+            
+            # Base options with enhanced anti-detection measures
+            base_opts = {
                 'format': 'bestaudio[ext=m4a]/bestaudio/best',
-                'force_ipv4': True,
-                'retries': 3,
-                'fragment_retries': 3,
-                'concurrent_fragment_downloads': 1,
-                'http_chunk_size': 10 * 1024 * 1024,  # 10 MB
-                'noplaylist': True,
-                'geo_bypass': True,
-                'geo_bypass_country': 'US',
-                'outtmpl': str(self.videos_dir / 'video_%(id)s.%(ext)s'),
-                'quiet': True,
-                'no_warnings': True,
+                'outtmpl': str(self.videos_dir / 'audio_%(id)s.%(ext)s'),
+                'quiet': False,  # Enable output for debugging
+                'verbose': True,
+                'no_warnings': False,
                 'prefer_ffmpeg': True,
-                'ffmpeg_location': 'ffmpeg',
-                'cachedir': False,  # disable cache to avoid stale signatures
-                'nocheckcertificate': True,
-                'sleep_interval': 1,
-                'max_sleep_interval': 3,
-                'sleep_interval_requests': 1,
-                'http_headers': {
-                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
-                    'Accept-Language': 'en-US,en;q=0.9',
-                    'Accept-Encoding': 'gzip, deflate',
-                    'DNT': '1',
-                    'Connection': 'keep-alive',
-                    'Upgrade-Insecure-Requests': '1',
-                    'Referer': 'https://www.youtube.com/'
-                },
+                'keepvideo': False,
                 'postprocessors': [{
                     'key': 'FFmpegExtractAudio',
                     'preferredcodec': 'mp3',
                     'preferredquality': '192',
                 }],
+                # Anti-detection options
+                'nocheckcertificate': True,
+                'no_check_certificate': True,
+                'geo_bypass': True,
+                'geo_bypass_country': 'US',
+                'age_limit': None,
+                # Network options - Force IPv4 to avoid IPv6 issues
+                'force_ipv4': True,
+                'source_address': '0.0.0.0',
+                'prefer_ipv4': True,  # Additional IPv4 preference
+                'concurrent_fragment_downloads': 1,
+                'retries': 10,
+                'fragment_retries': 10,
+                'retry_sleep_functions': {'http': lambda x: 2, 'fragment': lambda x: 2},
+                # Disable cache to avoid stale data
+                'cachedir': False,
+                'rm_cachedir': True,
             }
-
-            # Optional cookie/proxy injection when provided via secrets
-            if self.cookies_file_path:
-                common_opts['cookiefile'] = self.cookies_file_path
-            if self.proxy_url:
-                common_opts['proxy'] = self.proxy_url
-
-            # Try a couple of different player clients with more options
-            client_fallbacks = [
-                ['web_creator'],  # Often works when web doesn't
-                ['android_creator'],
-                ['ios'],  # iOS client sometimes bypasses restrictions
-                ['web_embedded'],  # Embedded player
-                ['android_embedded'],
-                ['mweb'],  # Mobile web
-                ['web'],
-                ['android'],
-                ['tv_embedded'],
+            
+            # List of user agents to try
+            user_agents = [
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:132.0) Gecko/20100101 Firefox/132.0',
             ]
             
-            # Add age gate bypass
-            common_opts['age_limit'] = None
-
-            last_err = None
-            for clients in client_fallbacks:
-                ydl_opts = dict(common_opts)
-                ydl_opts['extractor_args'] = {
-                    'youtube': {
-                        'player_client': clients,
-                    }
-                }
-                try:
-                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                        info = ydl.extract_info(url, download=True)
-                        filename = ydl.prepare_filename(info)
-                        audio_file = Path(filename).with_suffix('.mp3')
-
-                        original_title = info.get('title')
-                        return str(audio_file), original_title
-                except Exception as err:
-                    # Save and try next client
-                    last_err = err
-                    continue
-
-            # If all attempts failed, try pytube as fallback
-            if last_err:
-                st.info("Trying alternative download method...")
-                audio_file, title = self.download_with_pytube(url)
-                if audio_file and title:
-                    return audio_file, title
-                # If pytube also fails, try one more time with minimal yt-dlp options
-                else:
-                    minimal_opts = {
-                        'format': 'best',
-                        'outtmpl': str(self.videos_dir / 'video_%(id)s.%(ext)s'),
-                        'quiet': True,
-                        'no_warnings': True,
-                        'extract_flat': False,
-                        'force_generic_extractor': False,
-                        'postprocessors': [{
-                            'key': 'FFmpegExtractAudio',
-                            'preferredcodec': 'mp3',
-                            'preferredquality': '192',
-                        }],
-                    }
-                    try:
-                        with yt_dlp.YoutubeDL(minimal_opts) as ydl:
-                            info = ydl.extract_info(url, download=True)
-                            filename = ydl.prepare_filename(info)
-                            audio_file = Path(filename).with_suffix('.mp3')
-                            return str(audio_file), info.get('title')
-                    except:
-                        raise last_err
-
-        except Exception as e:
-            # Final fallback to pytube if not already tried
-            st.info("Primary download failed, trying alternative method...")
-            audio_file, title = self.download_with_pytube(url)
-            if audio_file and title:
-                return audio_file, title
+            # Enhanced player client list with latest working clients
+            player_clients = [
+                ['android_testsuite', 'android_vr', 'android_music'],
+                ['android_creator', 'android_testsuite'],
+                ['android_vr'],
+                ['android_music'], 
+                ['ios', 'ios_music'],
+                ['web_creator', 'web_embedded'],
+                ['mweb', 'android'],
+                ['tv_embedded', 'android_embedded'],
+            ]
             
-            # Check if it's a bot detection error
-            error_msg = str(e).lower()
-            if 'sign in' in error_msg or 'bot' in error_msg or '403' in error_msg:
-                st.error("🤖 **Bot Detection**: YouTube is blocking automated access from this server.")
-                st.warning("💡 **Alternatives**:\n\n"
-                          "1. Try a video that has captions/subtitles (no download needed)\n"
-                          "2. Use videos from educational channels (often less restricted)\n"
-                          "3. Try shorter videos (under 10 minutes)\n"
-                          "4. Wait a few minutes and try again\n"
-                          "5. Use the transcript-only option when available")
-                
-                # Provide some example videos that usually work
-                with st.expander("🎬 Suggested videos that typically work"):
-                    st.write("""
-                    - TED Talks: https://www.youtube.com/user/TEDtalksDirector
-                    - Khan Academy: https://www.youtube.com/user/khanacademy
-                    - MIT OpenCourseWare: https://www.youtube.com/user/MIT
-                    - Crash Course: https://www.youtube.com/user/crashcourse
-                    - Computerphile: https://www.youtube.com/user/Computerphile
-                    - 3Blue1Brown: https://www.youtube.com/channel/UCYO_jab_esuFRV4b17AJtAw
-                    """)
+            # Add cookies if available
+            if self.cookies_file_path and os.path.exists(self.cookies_file_path):
+                base_opts['cookiefile'] = self.cookies_file_path
+                logging.info("Using cookies file for authentication")
+            
+            # Add proxy if available
+            if self.proxy_url:
+                base_opts['proxy'] = self.proxy_url
+                logging.info(f"Using proxy: {self.proxy_url}")
+            
+            last_error = None
+            
+            # Try different combinations
+            for user_agent in user_agents:
+                for clients in player_clients:
+                    opts = base_opts.copy()
                     
-                # Increment retry counter
-                st.session_state.retry_count += 1
-            else:
-                st.error(f"⚠️ Unable to download video: {str(e)[:200]}...")
+                    # Set headers
+                    opts['http_headers'] = {
+                        'User-Agent': user_agent,
+                        'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                        'Accept-Language': 'en-US,en;q=0.9',
+                        'Accept-Encoding': 'gzip, deflate, br',
+                        'DNT': '1',
+                        'Connection': 'keep-alive',
+                        'Upgrade-Insecure-Requests': '1',
+                        'Sec-Fetch-Dest': 'document',
+                        'Sec-Fetch-Mode': 'navigate',
+                        'Sec-Fetch-Site': 'none',
+                        'Sec-Fetch-User': '?1',
+                        'Cache-Control': 'max-age=0',
+                    }
+                    
+                    # Set extractor args
+                    opts['extractor_args'] = {
+                        'youtube': {
+                            'player_client': clients,
+                            'skip': ['dash', 'hls'],  # Skip adaptive formats
+                        }
+                    }
+                    
+                    try:
+                        with st.spinner(f"Attempting download with {clients[0]} client..."):
+                            with yt_dlp.YoutubeDL(opts) as ydl:
+                                info = ydl.extract_info(url, download=True)
+                                
+                                # Get the downloaded file
+                                filename = ydl.prepare_filename(info)
+                                audio_file = Path(filename).with_suffix('.mp3')
+                                
+                                if audio_file.exists():
+                                    logging.info(f"Successfully downloaded using {clients[0]} client")
+                                    return str(audio_file), info.get('title', 'Unknown Title')
+                                    
+                    except Exception as e:
+                        last_error = e
+                        logging.warning(f"Failed with {clients[0]}: {str(e)}")
+                        time.sleep(random.uniform(1, 3))  # Wait before retry
+                        continue
+            
+            # If all yt-dlp attempts failed, try fallback methods
+            if last_error:
+                # Try pytubefix fallback
+                if PYTUBEFIX_AVAILABLE:
+                    st.info("Trying pytubefix fallback...")
+                    audio_file, title = self.download_with_pytubefix(url)
+                    if audio_file and title:
+                        logging.info("Successfully downloaded using pytubefix")
+                        return audio_file, title
                 
+                # Try RapidAPI fallback if available
+                if self.rapidapi_key:
+                    st.info("Trying online API fallback...")
+                    audio_file, title = self.download_with_online_api(url)
+                    if audio_file and title:
+                        logging.info("Successfully downloaded using RapidAPI")
+                        return audio_file, title
+                
+                # If all fallbacks failed, raise the error
+                raise last_error
+                
+        except Exception as e:
+            error_msg = str(e).lower()
+            
+            # Provide detailed error handling
+            if '403' in error_msg or 'forbidden' in error_msg:
+                st.error("❌ **HTTP 403 Error**: YouTube is blocking access from this server.")
+                st.info("""
+                **This is a known issue on Streamlit Community Cloud.** 
+                
+                YouTube actively blocks cloud server IPs to prevent automated downloads.
+                
+                **Workarounds:**
+                1. Deploy on a different platform (Heroku, Railway, etc.)
+                2. Use a VPS with residential IP
+                3. Set up a proxy server
+                4. Use the app locally instead
+                """)
+            elif 'sign in' in error_msg or 'bot' in error_msg:
+                st.error("🤖 **Bot Detection**: YouTube requires sign-in or has detected automated access.")
+            elif 'private' in error_msg:
+                st.error("🔒 **Private Video**: This video is private and cannot be accessed.")
+            elif 'unavailable' in error_msg:
+                st.error("❌ **Video Unavailable**: This video may be deleted, restricted, or region-locked.")
+            else:
+                st.error(f"⚠️ **Download Error**: {str(e)[:200]}...")
+                
+            # Log full error for debugging
+            logging.error(f"Full error: {str(e)}")
+            
             return None, None
 
 
@@ -606,11 +747,21 @@ def main():
             placeholder="Paste your YouTube video link here...",
             label_visibility="hidden"
         )
-        use_whisper_fallback = st.checkbox(
-            "Use Whisper fallback if transcript unavailable (slower)",
-            value=False,
-            help="If no captions are available, download audio and transcribe locally. Note: May not work for all videos due to YouTube restrictions."
-        )
+        # Options
+        col1, col2 = st.columns(2)
+        with col1:
+            try_subtitles_first = st.checkbox(
+                "Try subtitles first (faster)",
+                value=True,
+                help="Attempt to use YouTube's existing subtitles before downloading audio"
+            )
+        with col2:
+            whisper_model = st.selectbox(
+                "Whisper model",
+                ["tiny", "base", "small"],
+                index=1,
+                help="Larger models are more accurate but slower"
+            )
 
         # Submit button - always enabled when form is submitted
         submitted = st.form_submit_button("Summarize", type="primary")
@@ -627,55 +778,55 @@ def main():
         status_text = st.empty()
 
         try:
-            # Step 1: Try to fetch transcript without download
-            status_text.text("Fetching transcript...")
-            progress_bar.progress(20)
-            transcript, video_title = summarizer.get_transcript_text(url)
+            # Step 1: Get video title first
+            status_text.text("Getting video information...")
+            progress_bar.progress(10)
+            video_title = summarizer.fetch_title_via_oembed(url)
             
-            # If no transcript and whisper not enabled, provide helpful message
-            if not transcript and not use_whisper_fallback:
-                st.warning("📝 No transcript found for this video. Enable 'Use Whisper fallback' to transcribe the audio (this will be slower but works for most videos).")
-                
-                # Try to get video info to show to user
-                video_id = summarizer.extract_video_id(url)
-                if video_id:
-                    video_info = summarizer.get_video_info_via_api(video_id)
-                    if video_info:
-                        st.info(f"🎬 **Video**: {video_info['title']} by {video_info['author']}")
-
+            transcript = None
             audio_file = None
-
-            if not transcript and use_whisper_fallback:
-                # Optional fallback: download audio and transcribe
-                status_text.text("Downloading audio (fallback)...")
+            
+            # Step 2: Try subtitles first if enabled
+            if try_subtitles_first:
+                status_text.text("Checking for subtitles...")
+                progress_bar.progress(20)
+                subtitle_text, subtitle_title = summarizer.get_subtitles_fallback(url)
+                
+                if subtitle_text:
+                    transcript = subtitle_text
+                    if not video_title and subtitle_title:
+                        video_title = subtitle_title
+                    st.success("✅ Using YouTube subtitles (faster method)")
+                    progress_bar.progress(50)
+            
+            # Step 3: If no subtitles, download and transcribe
+            if not transcript:
+                # Download audio
+                status_text.text("Downloading audio...")
                 progress_bar.progress(30)
                 audio_file, video_title_dl = summarizer.download_youtube_video(url)
+                
                 if not audio_file:
+                    # If download failed, error is already shown by download_youtube_video
                     return
-
-                progress_bar.progress(40)
-                status_text.text("Transcribing audio (fallback)...")
-                transcript = summarizer.transcribe_audio(audio_file)
-                if not transcript:
-                    return
-                # Prefer any title we got from oEmbed; otherwise use dl title
-                if not video_title:
+                
+                # Use download title if we didn't get one from oEmbed
+                if not video_title and video_title_dl:
                     video_title = video_title_dl
-
-            if not transcript:
-                st.error("⚠️ No transcript could be obtained for this video. Please try:\n\n1. Enable the 'Whisper fallback' option\n2. Try a different video\n3. Use a video that has captions/subtitles enabled")
                 
-                # Provide some suggestions
-                st.info("💡 **Tips for best results**:\n\n"
-                       "- Videos with auto-generated captions work best (look for 'CC' button)\n"
-                       "- Educational content is often less restricted\n"
-                       "- Shorter videos (under 15 min) have better success rates\n"
-                       "- Recent videos may have more restrictions")
+                # Update Whisper model if different from default
+                if whisper_model != "base":
+                    summarizer.whisper_model = None  # Force reload
+                    summarizer.whisper_model = whisper.load_model(whisper_model)
+                    
+                # Transcribe with Whisper
+                progress_bar.progress(50)
+                status_text.text(f"Transcribing audio with Whisper ({whisper_model} model)...")
+                transcript = summarizer.transcribe_audio(audio_file)
                 
-                # Check if it might be a restricted video
-                if 'music' in url.lower() or 'vevo' in url.lower():
-                    st.warning("🎵 Music videos often have additional restrictions. Try educational or tutorial content instead.")
-                return
+                if not transcript:
+                    st.error("⚠️ Transcription failed. Please try a different video.")
+                    return
 
             progress_bar.progress(60)
 
