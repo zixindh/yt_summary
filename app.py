@@ -82,6 +82,26 @@ class YouTubeSummarizer:
         # Initialize models (lazy loading)
         self.whisper_model = None
 
+        # Optional: cookie/proxy support via Streamlit Secrets
+        self.cookies_file_path = None
+        try:
+            cookies_content = st.secrets.get('YTDLP_COOKIES')
+            if cookies_content:
+                temp_cookie_path = Path(tempfile.gettempdir()) / 'yt_cookies.txt'
+                with open(temp_cookie_path, 'w', encoding='utf-8') as f:
+                    f.write(cookies_content)
+                self.cookies_file_path = str(temp_cookie_path)
+        except Exception:
+            self.cookies_file_path = None
+
+        self.proxy_url = None
+        try:
+            proxy_val = st.secrets.get('YTDLP_PROXY')
+            if proxy_val:
+                self.proxy_url = proxy_val
+        except Exception:
+            self.proxy_url = None
+
         # Set FFmpeg path for Whisper
         self._set_ffmpeg_for_whisper()
 
@@ -119,20 +139,56 @@ class YouTubeSummarizer:
         try:
             # Configure yt-dlp options with optimized settings and bypass 403 issues
             ydl_opts = {
-                        'format': 'bestaudio/best',
+                        # Prefer m4a when available to reduce fragmentation issues
+                        'format': 'bestaudio[ext=m4a]/bestaudio/best',
+
+                        # Robustness against 403/segment issues
+                        'force_ipv4': True,  # Streamlit/hosted envs may have flaky IPv6
+                        'retries': 10,
+                        'fragment_retries': 15,
+                        'concurrent_fragment_downloads': 3,
+                        'http_chunk_size': 10 * 1024 * 1024,  # 10MB chunks
+                        'throttledratelimit': 10 * 1024 * 1024,  # 10MB/s
+                        'source_address': '0.0.0.0',
+                        'noplaylist': True,
+                        'geo_bypass': True,
+
+                        # Output and logging
+                        'outtmpl': str(self.videos_dir / 'video_%(id)s.%(ext)s'),
+                        'quiet': True,
+                        'no_warnings': True,
+
+                        # Prefer ffmpeg when available on Streamlit Cloud
+                        'prefer_ffmpeg': True,
+                        'ffmpeg_location': 'ffmpeg',
+
+                        # Use alternative YouTube clients to avoid certain 403s
+                        'extractor_args': {
+                            'youtube': {
+                                'player_client': ['android', 'tv', 'web'],
+                            }
+                        },
+
+                        # Headers to mimic a real browser + proper referer
+                        'http_headers': {
+                            'User-Agent': 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
+                            'Referer': 'https://www.youtube.com/',
+                            'Accept-Language': 'en-US,en;q=0.9'
+                        },
+
+                        # Post-process to mp3 for transcription workflow
                         'postprocessors': [{
                             'key': 'FFmpegExtractAudio',
                             'preferredcodec': 'mp3',
                             'preferredquality': '192',
                         }],
-                        'outtmpl': str(self.videos_dir / 'video_%(id)s.%(ext)s'),
-                        'quiet': True,
-                        'no_warnings': True,
-                        'extractor_args': {'youtube': {'player_client': ['android']}},
-                        'http_headers': {
-                            'User-Agent': 'Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.61 Mobile Safari/537.36'
-                        }
                     }
+
+            # Optional cookie/proxy injection when provided via secrets
+            if self.cookies_file_path:
+                ydl_opts['cookiefile'] = self.cookies_file_path
+            if self.proxy_url:
+                ydl_opts['proxy'] = self.proxy_url
 
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
