@@ -115,9 +115,9 @@ class YouTubeSummarizer:
         return sanitized
 
     def download_youtube_video(self, url):
-        """Download YouTube video as audio"""
+
         try:
-            # Configure yt-dlp options with optimized settings for speed
+            # Configure yt-dlp options with optimized settings and bypass 403 issues
             ydl_opts = {
                 'format': 'bestaudio/best',
                 'postprocessors': [{
@@ -129,21 +129,18 @@ class YouTubeSummarizer:
                 'quiet': True,
                 'no_warnings': True,
 
-                # Speed optimizations
-                'concurrent_fragments': 4,  # Download multiple fragments simultaneously
-                'fragment_retries': 3,     # Retry failed fragments
-                'retries': 3,              # Retry download on failure
-                'throttled_rate': None,    # Disable throttling
-                'extract_flat': False,     # Extract full metadata
-                'dump_single_json': False, # Don't dump JSON to speed up
+                # Fix for HTTP 403 Forbidden
+               # 'cookiesfrombrowser': ('chrome',),  # Use your logged-in Chrome session
+                'extractor_args': {'youtube': {'player_client': ['android']}},
+                'http_headers': {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36'
+                },
 
-                # Network optimizations
-                'socket_timeout': 30,      # Connection timeout
-                'extractor_retries': 3,    # Retry metadata extraction
-
-                # Performance settings
-                'buffersize': 1024 * 1024, # 1MB buffer size
-                'http_chunk_size': 10 * 1024 * 1024, # 10MB chunks
+                # Speed & reliability
+                'concurrent_fragments': 4,
+                'fragment_retries': 3,
+                'retries': 3,
+                'socket_timeout': 30,
             }
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
@@ -152,9 +149,7 @@ class YouTubeSummarizer:
                 # Replace extension with mp3
                 audio_file = Path(filename).with_suffix('.mp3')
 
-                # Get original title for AI prompt (preserve special characters for context)
                 original_title = info['title']
-                # Sanitize title only for display if needed
                 sanitized_title = self.sanitize_filename(original_title)
 
                 return str(audio_file), original_title
@@ -162,6 +157,7 @@ class YouTubeSummarizer:
         except Exception as e:
             st.error("⚠️ Unable to download video. Please check the URL and try again.")
             return None, None
+
 
     def transcribe_audio(self, audio_file):
         """Transcribe audio using Whisper"""
