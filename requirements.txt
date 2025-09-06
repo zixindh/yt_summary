@@ -12,6 +12,10 @@ soundfile>=0.12.1
 ffmpeg-python>=0.2.0
 python-dotenv>=1.0.0
 
+# Fetch captions without media download and perform simple HTTP requests
+youtube-transcript-api>=0.6.2
+requests>=2.31.0
+
 # Optional: add `openai` if you later want cloud fallback
 # openai>=1.0.0
  

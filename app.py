@@ -5,6 +5,15 @@ import os
 import tempfile
 import subprocess
 from pathlib import Path
+from urllib.parse import urlparse, parse_qs
+import requests
+from youtube_transcript_api import (
+    YouTubeTranscriptApi,
+    TranscriptsDisabled,
+    NoTranscriptFound,
+    TooManyRequests,
+    VideoUnavailable,
+)
 
 # Page configuration
 st.set_page_config(
@@ -134,6 +143,89 @@ class YouTubeSummarizer:
         sanitized = sanitized.strip(' ._')
         return sanitized
 
+    def extract_video_id(self, url: str):
+        """Extract the YouTube video ID from a variety of URL formats."""
+        try:
+            parsed = urlparse(url)
+            hostname = parsed.hostname or ""
+            if hostname.endswith("youtu.be"):
+                # Short URL like youtu.be/<id>
+                video_id = parsed.path.lstrip("/")
+                return video_id or None
+            if hostname.endswith("youtube.com"):
+                # Standard, shorts, or embed URLs
+                if parsed.path.startswith("/watch"):
+                    qs = parse_qs(parsed.query)
+                    return (qs.get("v", [None])[0])
+                if parsed.path.startswith("/shorts/"):
+                    return parsed.path.split("/shorts/")[-1].split("/")[0]
+                if parsed.path.startswith("/embed/"):
+                    return parsed.path.split("/embed/")[-1].split("/")[0]
+            # Fallback: try youtu.be pattern in path
+            if "youtu.be/" in url:
+                return url.split("youtu.be/")[-1].split("?")[0].split("&")[0].split("/")[0]
+        except Exception:
+            pass
+        return None
+
+    def fetch_title_via_oembed(self, url: str):
+        """Fetch video title via YouTube oEmbed (no auth)."""
+        try:
+            resp = requests.get(
+                "https://www.youtube.com/oembed",
+                params={"url": url, "format": "json"},
+                timeout=10,
+            )
+            if resp.status_code == 200:
+                data = resp.json()
+                return data.get("title")
+        except Exception:
+            pass
+        return None
+
+    def get_transcript_text(self, url: str):
+        """Attempt to retrieve transcript without downloading media.
+
+        Returns (transcript_text, video_title) or (None, video_title_if_available).
+        """
+        video_id = self.extract_video_id(url)
+        title = self.fetch_title_via_oembed(url)
+        if not video_id:
+            return None, title
+
+        try:
+            # Prefer manually created English subtitles, then auto-generated, then any available language
+            transcripts = YouTubeTranscriptApi.list_transcripts(video_id)
+
+            selected = None
+            try:
+                selected = transcripts.find_manually_created_transcript(["en", "en-US", "en-GB"])  # type: ignore[attr-defined]
+            except Exception:
+                selected = None
+            if selected is None:
+                try:
+                    selected = transcripts.find_generated_transcript(["en", "en-US", "en-GB"])  # type: ignore[attr-defined]
+                except Exception:
+                    selected = None
+            if selected is None:
+                # Fallback to first available transcript of any language
+                try:
+                    selected = next(iter(transcripts))
+                except StopIteration:
+                    selected = None
+
+            if selected is None:
+                return None, title
+
+            # Fetch and join lines
+            chunks = selected.fetch()
+            text = " ".join(chunk.get("text", "").replace("\n", " ") for chunk in chunks).strip()
+            return (text if text else None), title
+        except (TranscriptsDisabled, NoTranscriptFound, VideoUnavailable, TooManyRequests):
+            return None, title
+        except Exception:
+            return None, title
+
     def download_youtube_video(self, url):
         
         try:
@@ -206,7 +298,7 @@ class YouTubeSummarizer:
                 raise last_err
 
         except Exception as e:
-            st.error("⚠️ Unable to download video. Please check the URL and try again.")
+            st.error("⚠️ Unable to download video without authentication. Try another video or enable the Whisper fallback.")
             return None, None
 
 
@@ -347,6 +439,11 @@ def main():
             placeholder="Paste your YouTube video link here...",
             label_visibility="hidden"
         )
+        use_whisper_fallback = st.checkbox(
+            "Use Whisper fallback if transcript unavailable (slower)",
+            value=False,
+            help="If no captions are available, optionally download audio and transcribe locally."
+        )
 
         # Submit button - always enabled when form is submitted
         submitted = st.form_submit_button("Summarize", type="primary")
@@ -363,21 +460,32 @@ def main():
         status_text = st.empty()
 
         try:
-            # Step 1: Download video
-            status_text.text("Processing video...")
-            progress_bar.progress(10)
+            # Step 1: Try to fetch transcript without download
+            status_text.text("Fetching transcript...")
+            progress_bar.progress(20)
+            transcript, video_title = summarizer.get_transcript_text(url)
 
-            audio_file, video_title = summarizer.download_youtube_video(url)
-            if not audio_file:
-                return
+            audio_file = None
 
-            progress_bar.progress(30)
+            if not transcript and use_whisper_fallback:
+                # Optional fallback: download audio and transcribe
+                status_text.text("Downloading audio (fallback)...")
+                progress_bar.progress(30)
+                audio_file, video_title_dl = summarizer.download_youtube_video(url)
+                if not audio_file:
+                    return
 
-            # Step 2: Transcribe audio
-            status_text.text("Converting to text...")
-            transcript = summarizer.transcribe_audio(audio_file)
+                progress_bar.progress(40)
+                status_text.text("Transcribing audio (fallback)...")
+                transcript = summarizer.transcribe_audio(audio_file)
+                if not transcript:
+                    return
+                # Prefer any title we got from oEmbed; otherwise use dl title
+                if not video_title:
+                    video_title = video_title_dl
 
             if not transcript:
+                st.error("⚠️ No transcript available for this video without sign-in. Try another video or enable the Whisper fallback.")
                 return
 
             progress_bar.progress(60)
@@ -400,11 +508,12 @@ def main():
             st.markdown("### Summary")
             st.markdown(f'<div class="success-message">{summary}</div>', unsafe_allow_html=True)
 
-            # Cleanup
-            try:
-                os.remove(audio_file)
-            except:
-                pass
+            # Cleanup downloaded audio if any
+            if audio_file:
+                try:
+                    os.remove(audio_file)
+                except Exception:
+                    pass
 
         except Exception as e:
             st.markdown(f'<div class="error-message">❌ Error: {str(e)}</div>', unsafe_allow_html=True)
