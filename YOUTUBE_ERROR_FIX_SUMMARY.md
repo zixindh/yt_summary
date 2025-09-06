@@ -6,7 +6,7 @@ Streamlit Community Cloud was experiencing "Sign in to confirm you're not a bot"
 ## Solutions Implemented
 
 ### 1. **Multiple Download Methods**
-- Added `pytube` as a fallback library when `yt-dlp` fails
+- Replaced `yt-dlp` with `pytubefix` as the primary download method
 - Implemented multiple player client fallbacks including:
   - web_creator
   - android_creator
@@ -37,9 +37,8 @@ Streamlit Community Cloud was experiencing "Sign in to confirm you're not a bot"
 
 ### 5. **Fallback Strategies**
 - Primary: Use transcript API (no download needed)
-- Secondary: yt-dlp with multiple client types
-- Tertiary: pytube library
-- Final: Minimal yt-dlp configuration
+- Primary: pytubefix with anti-detection measures
+- Secondary: RapidAPI YouTube MP3 service
 
 ## Configuration Changes
 - Added `pytube>=15.0.0` to requirements.txt
