@@ -5,16 +5,10 @@ Streamlit Community Cloud was experiencing "Sign in to confirm you're not a bot"
 
 ## Solutions Implemented
 
-### 1. **Multiple Download Methods**
-- Replaced `yt-dlp` with `pytubefix` as the primary download method
-- Implemented multiple player client fallbacks including:
-  - web_creator
-  - android_creator
-  - ios
-  - web_embedded
-  - android_embedded
-  - mweb (mobile web)
-  - tv_embedded
+### 1. **Reliable Download Method**
+- Uses RapidAPI as the sole download method for reliability
+- Cloud-friendly solution that works on all platforms
+- No need for complex fallback mechanisms or player client workarounds
 
 ### 2. **Enhanced Bot Detection Avoidance**
 - Added random delays between requests (1-5 seconds)
@@ -35,14 +29,15 @@ Streamlit Community Cloud was experiencing "Sign in to confirm you're not a bot"
 - Example videos from channels that rarely get blocked
 - Better feedback during the download process
 
-### 5. **Fallback Strategies**
-- Primary: Use transcript API (no download needed)
-- Primary: pytubefix with anti-detection measures
-- Secondary: RapidAPI YouTube MP3 service
+### 5. **Simplified Strategy**
+- Single reliable method: RapidAPI YouTube MP3 service
+- No complex fallback chains needed
+- Consistent behavior across all deployment environments
 
 ## Configuration Changes
-- Added `pytube>=15.0.0` to requirements.txt
-- Prepared infrastructure for potential invidious instance usage
+- Removed pytubefix dependency from requirements.txt
+- Streamlined configuration to use only RapidAPI key
+- Simplified deployment process
 
 ## Best Practices for Users
 1. Prefer videos with captions/subtitles (no download needed)

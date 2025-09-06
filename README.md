@@ -60,7 +60,7 @@ The application will open in your default web browser at `http://localhost:8501`
 ### Architecture
 
 - **Frontend**: Streamlit for responsive web UI
-- **Video Download**: pytubefix (enhanced pytube fork) and RapidAPI
+- **Video Download**: RapidAPI for reliable cloud-based downloads
 - **Transcription**: OpenAI Whisper model
 - **Summarization**: Qwen Coder CLI assistant with contextual prompts
 - **Audio Processing**: FFmpeg for format conversion
@@ -176,7 +176,6 @@ Create a clear, comprehensive summary that captures the main points, key informa
 This project is open source. Please check individual tool licenses:
 - OpenAI Whisper: MIT License
 - Qwen Coder: Free to use (check Qwen Coder license)
-- pytubefix: MIT License
 - Streamlit: Apache 2.0 License
 
 ## 🤝 Contributing

@@ -18,8 +18,8 @@ rapidapi_key = "your-api-key-here"
 
 Note: Free tier has limited requests per month, but it's a reliable solution for cloud deployments.
 
-### 2. Use a Proxy Server
-If pytubefix is getting blocked, you can route requests through a proxy:
+### 2. Use a Proxy Server (Optional)
+If you need to route requests through a proxy:
 
 ```toml
 proxy_url = "http://proxy-server:port"
@@ -39,15 +39,11 @@ If you need unlimited downloads, consider deploying on:
 
 The app now uses a simplified approach focused on reliability:
 
-1. **Primary Method**: pytubefix - An enhanced fork of pytube with:
-   - Better error handling
-   - Proxy support
-   - More robust against YouTube changes
-   - Anti-bot detection measures
-
-2. **Fallback Method**: RapidAPI YouTube MP3 service
-   - Bypasses direct YouTube access
-   - Works reliably on cloud platforms
+1. **Single Method**: RapidAPI YouTube MP3 service
+   - Works consistently on cloud platforms
+   - Bypasses YouTube's bot detection
+   - Provides stable downloads
+   - No direct YouTube access needed
    - Requires API key but offers stable service
 
 ## Configuration in Streamlit Secrets

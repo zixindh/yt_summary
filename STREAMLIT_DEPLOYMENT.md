@@ -32,16 +32,15 @@ proxy_url = "http://your-proxy-server:port"
 
 ## How It Works
 
-The app uses two methods to download YouTube videos:
+The app uses RapidAPI to download YouTube videos:
 
-1. **pytubefix** (Primary): Direct download when possible
-2. **RapidAPI** (Fallback): Cloud-friendly API service
+**RapidAPI**: Cloud-friendly API service for reliable YouTube downloads
 
-When deployed on Streamlit Community Cloud, YouTube often blocks direct downloads. The RapidAPI fallback ensures your app continues working reliably.
+When deployed on Streamlit Community Cloud, YouTube often blocks direct downloads. RapidAPI ensures your app continues working reliably in cloud environments.
 
 ## Troubleshooting
 
-### Error: "Neither pytubefix nor RapidAPI key is available"
+### Error: "RapidAPI key is not configured"
 - Make sure you've added the `rapidapi_key` in your Streamlit secrets
 - Check that the key is valid and has remaining quota
 

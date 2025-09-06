@@ -5,7 +5,7 @@ A Streamlit application that automatically summarizes YouTube videos using AI.
 ## Features
 
 - **Easy Input**: Users can paste YouTube video links directly into the UI
-- **Automated Processing**: Downloads videos using pytubefix and RapidAPI
+- **Automated Processing**: Downloads videos using RapidAPI for reliable cloud performance
 - **AI Transcription**: Uses Whisper model to convert speech to text
 - **Smart Summarization**: Leverages Qwen Coder CLI assistant to generate concise summaries
 
