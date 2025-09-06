@@ -14,6 +14,16 @@ from youtube_transcript_api import (
     TooManyRequests,
     VideoUnavailable,
 )
+import time
+import random
+import json
+try:
+    from pytube import YouTube
+    from pytube.exceptions import PytubeError
+    PYTUBE_AVAILABLE = True
+except ImportError:
+    PYTUBE_AVAILABLE = False
+    PytubeError = Exception
 
 # Page configuration
 st.set_page_config(
@@ -21,6 +31,10 @@ st.set_page_config(
     page_icon="📝",
     layout="centered"
 )
+
+# Add session state for retry counter
+if 'retry_count' not in st.session_state:
+    st.session_state.retry_count = 0
 
 # Custom CSS for minimalistic design
 st.markdown("""
@@ -90,6 +104,14 @@ class YouTubeSummarizer:
 
         # Initialize models (lazy loading)
         self.whisper_model = None
+        
+        # List of public invidious instances (fallback option)
+        self.invidious_instances = [
+            "https://inv.tux.pizza",
+            "https://invidious.nerdvpn.de", 
+            "https://inv.in.projectsegfau.lt",
+            "https://invidious.privacyredirect.com"
+        ]
 
         # Optional: cookie/proxy support via Streamlit Secrets
         self.cookies_file_path = None
@@ -226,15 +248,81 @@ class YouTubeSummarizer:
         except Exception:
             return None, title
 
+    def get_video_info_via_api(self, video_id):
+        """Get video info using YouTube's public API endpoints"""
+        try:
+            # Try noembed API first
+            noembed_url = f"https://noembed.com/embed?url=https://www.youtube.com/watch?v={video_id}"
+            resp = requests.get(noembed_url, timeout=10)
+            if resp.status_code == 200:
+                data = resp.json()
+                return {
+                    'title': data.get('title', 'Unknown'),
+                    'author': data.get('author_name', 'Unknown'),
+                    'duration': data.get('duration', 0)
+                }
+        except:
+            pass
+        return None
+
+    def download_with_pytube(self, url):
+        """Fallback download method using pytube"""
+        if not PYTUBE_AVAILABLE:
+            return None, None
+            
+        try:
+            # Add delay and headers to avoid detection
+            time.sleep(random.uniform(2, 5))
+            
+            # Try with custom client
+            yt = YouTube(
+                url,
+                use_oauth=False,
+                allow_oauth_cache=False
+            )
+            
+            # Try to get audio stream
+            audio_stream = yt.streams.filter(only_audio=True).first()
+            if not audio_stream:
+                audio_stream = yt.streams.filter(progressive=True).order_by('abr').desc().first()
+                
+            if audio_stream:
+                # Download the stream
+                output_path = audio_stream.download(
+                    output_path=str(self.videos_dir),
+                    filename_prefix="audio_"
+                )
+                
+                # Convert to mp3 if needed
+                if not output_path.endswith('.mp3'):
+                    mp3_path = Path(output_path).with_suffix('.mp3')
+                    try:
+                        subprocess.run([
+                            'ffmpeg', '-i', output_path, '-acodec', 'mp3',
+                            '-ab', '192k', str(mp3_path), '-y'
+                        ], capture_output=True, check=True)
+                        os.remove(output_path)
+                        output_path = str(mp3_path)
+                    except:
+                        # If ffmpeg fails, just use the original file
+                        pass
+                        
+                return output_path, yt.title
+        except Exception as e:
+            return None, None
+
     def download_youtube_video(self, url):
         
         try:
+            # Add random delay to avoid bot detection
+            time.sleep(random.uniform(1, 3))
+            
             # Clean, robust base options; we will try a couple of player clients
             common_opts = {
                 'format': 'bestaudio[ext=m4a]/bestaudio/best',
                 'force_ipv4': True,
-                'retries': 5,
-                'fragment_retries': 5,
+                'retries': 3,
+                'fragment_retries': 3,
                 'concurrent_fragment_downloads': 1,
                 'http_chunk_size': 10 * 1024 * 1024,  # 10 MB
                 'noplaylist': True,
@@ -247,10 +335,18 @@ class YouTubeSummarizer:
                 'ffmpeg_location': 'ffmpeg',
                 'cachedir': False,  # disable cache to avoid stale signatures
                 'nocheckcertificate': True,
+                'sleep_interval': 1,
+                'max_sleep_interval': 3,
+                'sleep_interval_requests': 1,
                 'http_headers': {
                     'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
-                    'Referer': 'https://www.youtube.com/',
-                    'Accept-Language': 'en-US,en;q=0.9'
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/webp,*/*;q=0.8',
+                    'Accept-Language': 'en-US,en;q=0.9',
+                    'Accept-Encoding': 'gzip, deflate',
+                    'DNT': '1',
+                    'Connection': 'keep-alive',
+                    'Upgrade-Insecure-Requests': '1',
+                    'Referer': 'https://www.youtube.com/'
                 },
                 'postprocessors': [{
                     'key': 'FFmpegExtractAudio',
@@ -265,12 +361,21 @@ class YouTubeSummarizer:
             if self.proxy_url:
                 common_opts['proxy'] = self.proxy_url
 
-            # Try a couple of different player clients
+            # Try a couple of different player clients with more options
             client_fallbacks = [
+                ['web_creator'],  # Often works when web doesn't
+                ['android_creator'],
+                ['ios'],  # iOS client sometimes bypasses restrictions
+                ['web_embedded'],  # Embedded player
+                ['android_embedded'],
+                ['mweb'],  # Mobile web
                 ['web'],
                 ['android'],
-                ['tv'],
+                ['tv_embedded'],
             ]
+            
+            # Add age gate bypass
+            common_opts['age_limit'] = None
 
             last_err = None
             for clients in client_fallbacks:
@@ -293,12 +398,70 @@ class YouTubeSummarizer:
                     last_err = err
                     continue
 
-            # If all attempts failed, raise the last error to be handled below
+            # If all attempts failed, try pytube as fallback
             if last_err:
-                raise last_err
+                st.info("Trying alternative download method...")
+                audio_file, title = self.download_with_pytube(url)
+                if audio_file and title:
+                    return audio_file, title
+                # If pytube also fails, try one more time with minimal yt-dlp options
+                else:
+                    minimal_opts = {
+                        'format': 'best',
+                        'outtmpl': str(self.videos_dir / 'video_%(id)s.%(ext)s'),
+                        'quiet': True,
+                        'no_warnings': True,
+                        'extract_flat': False,
+                        'force_generic_extractor': False,
+                        'postprocessors': [{
+                            'key': 'FFmpegExtractAudio',
+                            'preferredcodec': 'mp3',
+                            'preferredquality': '192',
+                        }],
+                    }
+                    try:
+                        with yt_dlp.YoutubeDL(minimal_opts) as ydl:
+                            info = ydl.extract_info(url, download=True)
+                            filename = ydl.prepare_filename(info)
+                            audio_file = Path(filename).with_suffix('.mp3')
+                            return str(audio_file), info.get('title')
+                    except:
+                        raise last_err
 
         except Exception as e:
-            st.error("⚠️ Unable to download video without authentication. Try another video or enable the Whisper fallback.")
+            # Final fallback to pytube if not already tried
+            st.info("Primary download failed, trying alternative method...")
+            audio_file, title = self.download_with_pytube(url)
+            if audio_file and title:
+                return audio_file, title
+            
+            # Check if it's a bot detection error
+            error_msg = str(e).lower()
+            if 'sign in' in error_msg or 'bot' in error_msg or '403' in error_msg:
+                st.error("🤖 **Bot Detection**: YouTube is blocking automated access from this server.")
+                st.warning("💡 **Alternatives**:\n\n"
+                          "1. Try a video that has captions/subtitles (no download needed)\n"
+                          "2. Use videos from educational channels (often less restricted)\n"
+                          "3. Try shorter videos (under 10 minutes)\n"
+                          "4. Wait a few minutes and try again\n"
+                          "5. Use the transcript-only option when available")
+                
+                # Provide some example videos that usually work
+                with st.expander("🎬 Suggested videos that typically work"):
+                    st.write("""
+                    - TED Talks: https://www.youtube.com/user/TEDtalksDirector
+                    - Khan Academy: https://www.youtube.com/user/khanacademy
+                    - MIT OpenCourseWare: https://www.youtube.com/user/MIT
+                    - Crash Course: https://www.youtube.com/user/crashcourse
+                    - Computerphile: https://www.youtube.com/user/Computerphile
+                    - 3Blue1Brown: https://www.youtube.com/channel/UCYO_jab_esuFRV4b17AJtAw
+                    """)
+                    
+                # Increment retry counter
+                st.session_state.retry_count += 1
+            else:
+                st.error(f"⚠️ Unable to download video: {str(e)[:200]}...")
+                
             return None, None
 
 
@@ -425,6 +588,10 @@ Create a clear, very concise, comprehensive summary that captures the main point
 def main():
     st.markdown('<div class="main-header">YouTube Video Summarizer</div>', unsafe_allow_html=True)
     st.markdown('<div class="sub-header">Get quick summaries from YouTube videos</div>', unsafe_allow_html=True)
+    
+    # Show warning if multiple retries
+    if st.session_state.retry_count > 2:
+        st.info("🔄 If you're experiencing repeated failures, YouTube may be temporarily blocking this server. Try again in a few minutes.")
 
     # Initialize the summarizer
     summarizer = YouTubeSummarizer()
@@ -442,7 +609,7 @@ def main():
         use_whisper_fallback = st.checkbox(
             "Use Whisper fallback if transcript unavailable (slower)",
             value=False,
-            help="If no captions are available, optionally download audio and transcribe locally."
+            help="If no captions are available, download audio and transcribe locally. Note: May not work for all videos due to YouTube restrictions."
         )
 
         # Submit button - always enabled when form is submitted
@@ -464,6 +631,17 @@ def main():
             status_text.text("Fetching transcript...")
             progress_bar.progress(20)
             transcript, video_title = summarizer.get_transcript_text(url)
+            
+            # If no transcript and whisper not enabled, provide helpful message
+            if not transcript and not use_whisper_fallback:
+                st.warning("📝 No transcript found for this video. Enable 'Use Whisper fallback' to transcribe the audio (this will be slower but works for most videos).")
+                
+                # Try to get video info to show to user
+                video_id = summarizer.extract_video_id(url)
+                if video_id:
+                    video_info = summarizer.get_video_info_via_api(video_id)
+                    if video_info:
+                        st.info(f"🎬 **Video**: {video_info['title']} by {video_info['author']}")
 
             audio_file = None
 
@@ -485,7 +663,18 @@ def main():
                     video_title = video_title_dl
 
             if not transcript:
-                st.error("⚠️ No transcript available for this video without sign-in. Try another video or enable the Whisper fallback.")
+                st.error("⚠️ No transcript could be obtained for this video. Please try:\n\n1. Enable the 'Whisper fallback' option\n2. Try a different video\n3. Use a video that has captions/subtitles enabled")
+                
+                # Provide some suggestions
+                st.info("💡 **Tips for best results**:\n\n"
+                       "- Videos with auto-generated captions work best (look for 'CC' button)\n"
+                       "- Educational content is often less restricted\n"
+                       "- Shorter videos (under 15 min) have better success rates\n"
+                       "- Recent videos may have more restrictions")
+                
+                # Check if it might be a restricted video
+                if 'music' in url.lower() or 'vevo' in url.lower():
+                    st.warning("🎵 Music videos often have additional restrictions. Try educational or tutorial content instead.")
                 return
 
             progress_bar.progress(60)
@@ -507,6 +696,9 @@ def main():
             # Display results - focus on summary
             st.markdown("### Summary")
             st.markdown(f'<div class="success-message">{summary}</div>', unsafe_allow_html=True)
+            
+            # Reset retry counter on success
+            st.session_state.retry_count = 0
 
             # Cleanup downloaded audio if any
             if audio_file:
@@ -522,11 +714,12 @@ def main():
             progress_bar.empty()
             status_text.empty()
 
-    # Minimal footer
+    # Minimal footer with status
     st.markdown("---")
     st.markdown(
         "<div style='text-align: center; color: #999; font-size: 0.9rem;'>"
-        "Powered by AI"
+        "Powered by AI | "
+        "<span style='color: #666;'>Note: Some videos may be restricted by YouTube</span>"
         "</div>",
         unsafe_allow_html=True
     )
