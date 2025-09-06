@@ -135,72 +135,75 @@ class YouTubeSummarizer:
         return sanitized
 
     def download_youtube_video(self, url):
-
+        
         try:
-            # Configure yt-dlp options with optimized settings and bypass 403 issues
-            ydl_opts = {
-                        # Prefer m4a when available to reduce fragmentation issues
-                        'format': 'bestaudio[ext=m4a]/bestaudio/best',
-
-                        # Robustness against 403/segment issues
-                        'force_ipv4': True,  # Streamlit/hosted envs may have flaky IPv6
-                        'retries': 10,
-                        'fragment_retries': 15,
-                        'concurrent_fragment_downloads': 3,
-                        'http_chunk_size': 10 * 1024 * 1024,  # 10MB chunks
-                        'throttledratelimit': 10 * 1024 * 1024,  # 10MB/s
-                        'source_address': '0.0.0.0',
-                        'noplaylist': True,
-                        'geo_bypass': True,
-
-                        # Output and logging
-                        'outtmpl': str(self.videos_dir / 'video_%(id)s.%(ext)s'),
-                        'quiet': True,
-                        'no_warnings': True,
-
-                        # Prefer ffmpeg when available on Streamlit Cloud
-                        'prefer_ffmpeg': True,
-                        'ffmpeg_location': 'ffmpeg',
-
-                        # Use alternative YouTube clients to avoid certain 403s
-                        'extractor_args': {
-                            'youtube': {
-                                'player_client': ['android', 'tv', 'web'],
-                            }
-                        },
-
-                        # Headers to mimic a real browser + proper referer
-                        'http_headers': {
-                            'User-Agent': 'Mozilla/5.0 (Linux; Android 13; Pixel 7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Mobile Safari/537.36',
-                            'Referer': 'https://www.youtube.com/',
-                            'Accept-Language': 'en-US,en;q=0.9'
-                        },
-
-                        # Post-process to mp3 for transcription workflow
-                        'postprocessors': [{
-                            'key': 'FFmpegExtractAudio',
-                            'preferredcodec': 'mp3',
-                            'preferredquality': '192',
-                        }],
-                    }
+            # Clean, robust base options; we will try a couple of player clients
+            common_opts = {
+                'format': 'bestaudio[ext=m4a]/bestaudio/best',
+                'force_ipv4': True,
+                'retries': 5,
+                'fragment_retries': 5,
+                'concurrent_fragment_downloads': 1,
+                'http_chunk_size': 10 * 1024 * 1024,  # 10 MB
+                'noplaylist': True,
+                'geo_bypass': True,
+                'geo_bypass_country': 'US',
+                'outtmpl': str(self.videos_dir / 'video_%(id)s.%(ext)s'),
+                'quiet': True,
+                'no_warnings': True,
+                'prefer_ffmpeg': True,
+                'ffmpeg_location': 'ffmpeg',
+                'cachedir': False,  # disable cache to avoid stale signatures
+                'nocheckcertificate': True,
+                'http_headers': {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36',
+                    'Referer': 'https://www.youtube.com/',
+                    'Accept-Language': 'en-US,en;q=0.9'
+                },
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'mp3',
+                    'preferredquality': '192',
+                }],
+            }
 
             # Optional cookie/proxy injection when provided via secrets
             if self.cookies_file_path:
-                ydl_opts['cookiefile'] = self.cookies_file_path
+                common_opts['cookiefile'] = self.cookies_file_path
             if self.proxy_url:
-                ydl_opts['proxy'] = self.proxy_url
+                common_opts['proxy'] = self.proxy_url
 
+            # Try a couple of different player clients
+            client_fallbacks = [
+                ['web'],
+                ['android'],
+                ['tv'],
+            ]
 
-            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                info = ydl.extract_info(url, download=True)
-                filename = ydl.prepare_filename(info)
-                # Replace extension with mp3
-                audio_file = Path(filename).with_suffix('.mp3')
+            last_err = None
+            for clients in client_fallbacks:
+                ydl_opts = dict(common_opts)
+                ydl_opts['extractor_args'] = {
+                    'youtube': {
+                        'player_client': clients,
+                    }
+                }
+                try:
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        info = ydl.extract_info(url, download=True)
+                        filename = ydl.prepare_filename(info)
+                        audio_file = Path(filename).with_suffix('.mp3')
 
-                original_title = info['title']
-                sanitized_title = self.sanitize_filename(original_title)
+                        original_title = info.get('title')
+                        return str(audio_file), original_title
+                except Exception as err:
+                    # Save and try next client
+                    last_err = err
+                    continue
 
-                return str(audio_file), original_title
+            # If all attempts failed, raise the last error to be handled below
+            if last_err:
+                raise last_err
 
         except Exception as e:
             st.error("⚠️ Unable to download video. Please check the URL and try again.")
