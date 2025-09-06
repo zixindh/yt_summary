@@ -119,21 +119,29 @@ class YouTubeSummarizer:
         try:
             # Configure yt-dlp options with optimized settings and bypass 403 issues
             ydl_opts = {
-                        'format': 'bestaudio/best',
-                        'postprocessors': [{
-                            'key': 'FFmpegExtractAudio',
-                            'preferredcodec': 'mp3',
-                            'preferredquality': '192',
-                        }],
-                        'outtmpl': str(self.videos_dir / 'video_%(id)s.%(ext)s'),
-                        'quiet': True,
-                        'no_warnings': True,
-                        'extractor_args': {'youtube': {'player_client': ['android']}},
-                        'http_headers': {
-                            'User-Agent': 'Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/94.0.4606.61 Mobile Safari/537.36'
-                        }
-                    }
+                'format': 'bestaudio/best',
+                'postprocessors': [{
+                    'key': 'FFmpegExtractAudio',
+                    'preferredcodec': 'mp3',
+                    'preferredquality': '192',
+                }],
+                'outtmpl': str(self.videos_dir / 'video_%(id)s.%(ext)s'),  # Use video ID instead of title
+                'quiet': True,
+                'no_warnings': True,
 
+                # Fix for HTTP 403 Forbidden
+               # 'cookiesfrombrowser': ('chrome',),  # Use your logged-in Chrome session
+                'extractor_args': {'youtube': {'player_client': ['android']}},
+                'http_headers': {
+                    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/116.0.0.0 Safari/537.36'
+                },
+
+                # Speed & reliability
+                'concurrent_fragments': 4,
+                'fragment_retries': 3,
+                'retries': 3,
+                'socket_timeout': 30,
+            }
 
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
