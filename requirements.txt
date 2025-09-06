@@ -1,6 +1,5 @@
 streamlit>=1.32.0
 requests>=2.31.0
-pytubefix>=6.0.0  # Enhanced pytube fork with better error handling
 
 # Whisper for transcription
 openai-whisper>=20231117

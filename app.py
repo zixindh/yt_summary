@@ -15,15 +15,6 @@ import base64
 # Configure logging for debugging
 logging.basicConfig(level=logging.INFO)
 
-# Try to import pytubefix
-try:
-    from pytubefix import YouTube
-    from pytubefix.cli import on_progress
-    PYTUBEFIX_AVAILABLE = True
-except ImportError:
-    PYTUBEFIX_AVAILABLE = False
-    logging.warning("pytubefix not available, skipping this fallback option")
-
 # Page configuration
 st.set_page_config(
     page_title="YouTube Summarizer",
@@ -230,63 +221,6 @@ class YouTubeSummarizer:
 
     
     
-    def download_with_pytubefix(self, url):
-        """Fallback download using pytubefix"""
-        if not PYTUBEFIX_AVAILABLE:
-            return None, None
-            
-        try:
-            # Add delay to avoid bot detection
-            time.sleep(random.uniform(2, 4))
-            
-            # Create YouTube object with proxy if available
-            yt_kwargs = {
-                'url': url,
-                'on_progress_callback': on_progress,
-                'use_oauth': False,
-                'allow_oauth_cache': False
-            }
-            
-            if self.proxy_url:
-                yt_kwargs['proxies'] = {
-                    'http': self.proxy_url,
-                    'https': self.proxy_url
-                }
-                
-            yt = YouTube(**yt_kwargs)
-            
-            # Try to get audio stream
-            audio_stream = yt.streams.get_audio_only()
-            if not audio_stream:
-                # Fallback to lowest quality if audio-only not available
-                audio_stream = yt.streams.filter(progressive=True, file_extension='mp4').order_by('resolution').asc().first()
-                
-            if audio_stream:
-                # Download the stream
-                output_path = audio_stream.download(
-                    output_path=str(self.videos_dir),
-                    filename_prefix="pytubefix_"
-                )
-                
-                # Convert to mp3
-                mp3_path = Path(output_path).with_suffix('.mp3')
-                try:
-                    subprocess.run([
-                        'ffmpeg', '-i', output_path, '-acodec', 'mp3',
-                        '-ab', '192k', str(mp3_path), '-y'
-                    ], capture_output=True, check=True)
-                    os.remove(output_path)
-                    output_path = str(mp3_path)
-                except:
-                    # If ffmpeg fails, rename to mp3 anyway
-                    os.rename(output_path, str(mp3_path))
-                    output_path = str(mp3_path)
-                    
-                return output_path, yt.title
-                
-        except Exception as e:
-            logging.warning(f"pytubefix failed: {str(e)}")
-            return None, None
     
     def download_with_online_api(self, url):
         """Fallback using RapidAPI YouTube downloader"""
@@ -336,60 +270,39 @@ class YouTubeSummarizer:
         return None, None
     
     def download_youtube_video(self, url):
-        """Download YouTube video using pytubefix as primary method and RapidAPI as fallback"""
+        """Download YouTube video using RapidAPI"""
         try:
-            # Add random delay to avoid bot detection
-            time.sleep(random.uniform(2, 5))
-            
-            # Try pytubefix first
-            if PYTUBEFIX_AVAILABLE:
-                st.info("Downloading video...")
-                audio_file, title = self.download_with_pytubefix(url)
-                if audio_file and title:
-                    logging.info("Successfully downloaded using pytubefix")
-                    return audio_file, title
-            
-            # Try RapidAPI fallback if available
-            if self.rapidapi_key:
-                st.info("Trying online API...")
-                audio_file, title = self.download_with_online_api(url)
-                if audio_file and title:
-                    logging.info("Successfully downloaded using RapidAPI")
-                    return audio_file, title
-            
-            # If both methods failed
-            if not PYTUBEFIX_AVAILABLE and not self.rapidapi_key:
-                st.error("❌ **Configuration Error**: Neither pytubefix nor RapidAPI key is available.")
+            # Check if RapidAPI key is available
+            if not self.rapidapi_key:
+                st.error("❌ **Configuration Error**: RapidAPI key is not configured.")
                 st.info("""
                 **Setup Instructions:**
-                1. Make sure pytubefix is installed: `pip install pytubefix`
+                1. Get your RapidAPI key from: https://rapidapi.com/ytjar/api/youtube-mp36/
                 2. Add your RapidAPI key in Streamlit secrets as: `rapidapi_key = "your_key_here"`
                 
-                Get your RapidAPI key from: https://rapidapi.com/ytjar/api/youtube-mp36/
+                This ensures reliable YouTube downloads on cloud platforms.
                 """)
                 return None, None
+            
+            # Add a small delay
+            time.sleep(random.uniform(1, 2))
+            
+            # Download using RapidAPI
+            st.info("Downloading video...")
+            audio_file, title = self.download_with_online_api(url)
+            if audio_file and title:
+                logging.info("Successfully downloaded using RapidAPI")
+                return audio_file, title
             else:
-                raise Exception("Download failed with all available methods")
+                raise Exception("Download failed with RapidAPI")
                 
         except Exception as e:
             error_msg = str(e).lower()
             
             # Provide detailed error handling
             if '403' in error_msg or 'forbidden' in error_msg:
-                st.error("❌ **HTTP 403 Error**: YouTube is blocking access from this server.")
-                st.info("""
-                **This is a known issue on cloud platforms.** 
-                
-                YouTube actively blocks cloud server IPs to prevent automated downloads.
-                
-                **Solutions:**
-                1. Use RapidAPI by adding `rapidapi_key` in Streamlit secrets
-                2. Deploy on a different platform with residential IPs
-                3. Set up a proxy server (add `proxy_url` in secrets)
-                4. Use the app locally instead
-                """)
-            elif 'sign in' in error_msg or 'bot' in error_msg:
-                st.error("🤖 **Bot Detection**: YouTube requires sign-in or has detected automated access.")
+                st.error("❌ **HTTP 403 Error**: Access denied.")
+                st.info("Please check your RapidAPI key and quota.")
             elif 'private' in error_msg:
                 st.error("🔒 **Private Video**: This video is private and cannot be accessed.")
             elif 'unavailable' in error_msg:
