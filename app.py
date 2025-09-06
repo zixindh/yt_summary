@@ -12,6 +12,10 @@ import json
 import logging
 import re
 import base64
+from dotenv import load_dotenv
+
+# Load environment variables from .env file
+load_dotenv()
 # Configure logging for debugging
 logging.basicConfig(level=logging.INFO)
 
@@ -108,11 +112,17 @@ class YouTubeSummarizer:
         
         # RapidAPI key for online fallback
         self.rapidapi_key = None
-        try:
-            if hasattr(st, 'secrets'):
-                self.rapidapi_key = st.secrets.get('rapidapi_key', '')
-        except:
-            pass
+
+        # Try to get from environment variables first (for local development)
+        self.rapidapi_key = os.getenv('RAPIDAPI_KEY', '')
+
+        # Fallback to Streamlit secrets (for cloud deployment)
+        if not self.rapidapi_key:
+            try:
+                if hasattr(st, 'secrets'):
+                    self.rapidapi_key = st.secrets.get('rapidapi_key', '')
+            except:
+                pass
 
         # Set FFmpeg path for Whisper
         self._set_ffmpeg_for_whisper()
@@ -224,9 +234,10 @@ class YouTubeSummarizer:
     
     def download_with_online_api(self, url):
         """Fallback using RapidAPI YouTube downloader"""
-        if not self.rapidapi_key:
+        if not self.rapidapi_key or self.rapidapi_key == 'your_rapidapi_key_here':
+            logging.error("RapidAPI key not configured or using placeholder value")
             return None, None
-            
+
         try:
             # Extract video ID
             video_id = self.extract_video_id(url)
@@ -236,15 +247,17 @@ class YouTubeSummarizer:
             # RapidAPI endpoint for YouTube MP3 download
             rapidapi_url = "https://youtube-mp36.p.rapidapi.com/dl"
             headers = {
-                "X-RapidAPI-Key": self.rapidapi_key,
-                "X-RapidAPI-Host": "youtube-mp36.p.rapidapi.com"
+                "x-rapidapi-key": self.rapidapi_key,
+                "x-rapidapi-host": "youtube-mp36.p.rapidapi.com"
             }
             
             params = {"id": video_id}
             
             # Make API request
+            logging.info(f"Making RapidAPI request for video ID: {video_id}")
             response = requests.get(rapidapi_url, headers=headers, params=params, timeout=30)
-            
+            logging.info(f"RapidAPI response status: {response.status_code}")
+
             if response.status_code == 200:
                 data = response.json()
                 
